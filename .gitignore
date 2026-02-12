@@ -108,3 +108,7 @@ node_modules/.bin/
 /cache0
 /devkit
 recent.toml
+
+# Local agent/editor metadata that should never be versioned.
+AGENTS.md
+.codex/
