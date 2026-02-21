@@ -23,12 +23,28 @@
 #include "xenia/gpu/register_file.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/spirv_builder.h"
+#include "xenia/gpu/spirv_compatibility.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/vulkan/vulkan_command_processor.h"
 #include "xenia/gpu/vulkan/vulkan_shader.h"
 #include "xenia/gpu/xenos.h"
 #include "xenia/ui/vulkan/vulkan_util.h"
 
+// Tessellation shader bytecode.
+namespace shaders {
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/adaptive_quad_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/adaptive_triangle_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/continuous_quad_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/continuous_quad_4cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/continuous_triangle_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/continuous_triangle_3cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/discrete_quad_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/discrete_quad_4cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/discrete_triangle_1cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/discrete_triangle_3cp_hs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/tessellation_adaptive_vs.h"
+#include "xenia/gpu/shaders/bytecode/vulkan_spirv/tessellation_indexed_vs.h"
+}  // namespace shaders
 namespace xe {
 namespace gpu {
 namespace vulkan {
@@ -58,6 +74,7 @@ bool VulkanPipelineCache::Initialize() {
       render_target_cache_.msaa_2x_attachments_supported(),
       render_target_cache_.msaa_2x_no_attachments_supported(),
       edram_fragment_shader_interlock,
+      render_target_cache_.gamma_render_target_as_srgb(),
       render_target_cache_.draw_resolution_scale_x(),
       render_target_cache_.draw_resolution_scale_y());
 
@@ -78,6 +95,79 @@ bool VulkanPipelineCache::Initialize() {
     }
   }
 
+  // Create tessellation shaders if tessellation is supported.
+  if (vulkan_device->properties().tessellationShader) {
+    // Vertex shaders for tessellation.
+    tessellation_indexed_vs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::tessellation_indexed_vs,
+        sizeof(shaders::tessellation_indexed_vs));
+    tessellation_adaptive_vs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::tessellation_adaptive_vs,
+        sizeof(shaders::tessellation_adaptive_vs));
+    // Discrete mode hull shaders.
+    discrete_triangle_1cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::discrete_triangle_1cp_hs,
+        sizeof(shaders::discrete_triangle_1cp_hs));
+    discrete_triangle_3cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::discrete_triangle_3cp_hs,
+        sizeof(shaders::discrete_triangle_3cp_hs));
+    discrete_quad_1cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::discrete_quad_1cp_hs,
+        sizeof(shaders::discrete_quad_1cp_hs));
+    discrete_quad_4cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::discrete_quad_4cp_hs,
+        sizeof(shaders::discrete_quad_4cp_hs));
+    // Continuous mode hull shaders.
+    continuous_triangle_1cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::continuous_triangle_1cp_hs,
+        sizeof(shaders::continuous_triangle_1cp_hs));
+    continuous_triangle_3cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::continuous_triangle_3cp_hs,
+        sizeof(shaders::continuous_triangle_3cp_hs));
+    continuous_quad_1cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::continuous_quad_1cp_hs,
+        sizeof(shaders::continuous_quad_1cp_hs));
+    continuous_quad_4cp_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::continuous_quad_4cp_hs,
+        sizeof(shaders::continuous_quad_4cp_hs));
+    // Adaptive mode hull shaders.
+    adaptive_triangle_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::adaptive_triangle_hs,
+        sizeof(shaders::adaptive_triangle_hs));
+    adaptive_quad_hs_ = ui::vulkan::util::CreateShaderModule(
+        vulkan_device, shaders::adaptive_quad_hs,
+        sizeof(shaders::adaptive_quad_hs));
+
+    // Verify all tessellation shaders were created successfully.
+    if (tessellation_indexed_vs_ == VK_NULL_HANDLE ||
+        tessellation_adaptive_vs_ == VK_NULL_HANDLE ||
+        discrete_triangle_1cp_hs_ == VK_NULL_HANDLE ||
+        discrete_triangle_3cp_hs_ == VK_NULL_HANDLE ||
+        discrete_quad_1cp_hs_ == VK_NULL_HANDLE ||
+        discrete_quad_4cp_hs_ == VK_NULL_HANDLE ||
+        continuous_triangle_1cp_hs_ == VK_NULL_HANDLE ||
+        continuous_triangle_3cp_hs_ == VK_NULL_HANDLE ||
+        continuous_quad_1cp_hs_ == VK_NULL_HANDLE ||
+        continuous_quad_4cp_hs_ == VK_NULL_HANDLE ||
+        adaptive_triangle_hs_ == VK_NULL_HANDLE ||
+        adaptive_quad_hs_ == VK_NULL_HANDLE) {
+      XELOGW(
+          "VulkanPipelineCache: Failed to create one or more tessellation "
+          "shaders - tessellation will not be available");
+    }
+  }
+
+  // Create Vulkan pipeline cache for faster pipeline creation.
+  VkPipelineCacheCreateInfo pipeline_cache_create_info = {};
+  pipeline_cache_create_info.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+  if (vulkan_device->functions().vkCreatePipelineCache(
+          vulkan_device->device(), &pipeline_cache_create_info, nullptr,
+          &vk_pipeline_cache_) != VK_SUCCESS) {
+    XELOGW("VulkanPipelineCache: Failed to create pipeline cache");
+    vk_pipeline_cache_ = VK_NULL_HANDLE;
+  }
+
   return true;
 }
 
@@ -96,9 +186,40 @@ void VulkanPipelineCache::Shutdown() {
   }
   pipelines_.clear();
 
+  // Destroy the pipeline cache.
+  if (vk_pipeline_cache_ != VK_NULL_HANDLE) {
+    dfn.vkDestroyPipelineCache(device, vk_pipeline_cache_, nullptr);
+    vk_pipeline_cache_ = VK_NULL_HANDLE;
+  }
+
   // Destroy all internal shaders.
   ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
                                          depth_only_fragment_shader_);
+  // Destroy tessellation shaders.
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         tessellation_indexed_vs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         tessellation_adaptive_vs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         discrete_triangle_1cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         discrete_triangle_3cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         discrete_quad_1cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         discrete_quad_4cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         continuous_triangle_1cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         continuous_triangle_3cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         continuous_quad_1cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         continuous_quad_4cp_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         adaptive_triangle_hs_);
+  ui::vulkan::util::DestroyAndNullHandle(dfn.vkDestroyShaderModule, device,
+                                         adaptive_quad_hs_);
   for (const auto& geometry_shader_pair : geometry_shaders_) {
     if (geometry_shader_pair.second != VK_NULL_HANDLE) {
       dfn.vkDestroyShaderModule(device, geometry_shader_pair.second, nullptr);
@@ -156,6 +277,14 @@ VulkanPipelineCache::GetCurrentVertexShaderModification(
           host_vertex_shader_type));
 
   modification.vertex.interpolator_mask = interpolator_mask;
+
+  // User clip planes.
+  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
+  uint32_t user_clip_planes =
+      pa_cl_clip_cntl.clip_disable ? 0 : pa_cl_clip_cntl.ucp_ena;
+  modification.vertex.user_clip_plane_count = xe::bit_count(user_clip_planes);
+  modification.vertex.user_clip_plane_cull =
+      uint32_t(user_clip_planes && pa_cl_clip_cntl.ucp_cull_only_ena);
 
   if (host_vertex_shader_type ==
       Shader::HostVertexShaderType::kPointListAsTriangleStrip) {
@@ -341,10 +470,34 @@ bool VulkanPipelineCache::ConfigurePipeline(
   PipelineCreationArguments creation_arguments;
   auto& pipeline =
       *pipelines_.emplace(description, Pipeline(pipeline_layout)).first;
+  // Get tessellation shaders if needed.
+  VkShaderModule tessellation_vertex_shader = VK_NULL_HANDLE;
+  VkShaderModule tessellation_control_shader = VK_NULL_HANDLE;
+  if (description.tessellation_mode != PipelineTessellationMode::kNone) {
+    tessellation_vertex_shader =
+        GetTessellationVertexShader(description.tessellation_mode);
+    bool use_control_point_count =
+        (description.tessellation_mode == PipelineTessellationMode::kAdaptive);
+    tessellation_control_shader = GetTessellationControlShader(
+        description.tessellation_mode, description.tessellation_patch,
+        use_control_point_count);
+    if (tessellation_vertex_shader == VK_NULL_HANDLE ||
+        tessellation_control_shader == VK_NULL_HANDLE) {
+      XELOGE(
+          "VulkanPipelineCache: Failed to get tessellation shaders for mode {} "
+          "patch {}",
+          static_cast<uint32_t>(description.tessellation_mode),
+          static_cast<uint32_t>(description.tessellation_patch));
+      return false;
+    }
+  }
+
   creation_arguments.pipeline = &pipeline;
   creation_arguments.vertex_shader = vertex_shader;
   creation_arguments.pixel_shader = pixel_shader;
   creation_arguments.geometry_shader = geometry_shader;
+  creation_arguments.tessellation_vertex_shader = tessellation_vertex_shader;
+  creation_arguments.tessellation_control_shader = tessellation_control_shader;
   creation_arguments.render_pass = render_pass;
   if (!EnsurePipelineCreated(creation_arguments)) {
     return false;
@@ -529,39 +682,90 @@ bool VulkanPipelineCache::GetCurrentStateDescription(
   // without them.
   PipelineGeometryShader geometry_shader = PipelineGeometryShader::kNone;
   PipelinePrimitiveTopology primitive_topology;
-  switch (primitive_processing_result.host_primitive_type) {
-    case xenos::PrimitiveType::kPointList:
-      geometry_shader = PipelineGeometryShader::kPointList;
-      primitive_topology = PipelinePrimitiveTopology::kPointList;
-      break;
-    case xenos::PrimitiveType::kLineList:
-      primitive_topology = PipelinePrimitiveTopology::kLineList;
-      break;
-    case xenos::PrimitiveType::kLineStrip:
-      primitive_topology = PipelinePrimitiveTopology::kLineStrip;
-      break;
-    case xenos::PrimitiveType::kTriangleList:
-      primitive_topology = PipelinePrimitiveTopology::kTriangleList;
-      break;
-    case xenos::PrimitiveType::kTriangleFan:
-      // The check should be performed at primitive processing time.
-      assert_true(device_properties.triangleFans);
-      primitive_topology = PipelinePrimitiveTopology::kTriangleFan;
-      break;
-    case xenos::PrimitiveType::kTriangleStrip:
-      primitive_topology = PipelinePrimitiveTopology::kTriangleStrip;
-      break;
-    case xenos::PrimitiveType::kRectangleList:
-      geometry_shader = PipelineGeometryShader::kRectangleList;
-      primitive_topology = PipelinePrimitiveTopology::kTriangleList;
-      break;
-    case xenos::PrimitiveType::kQuadList:
-      geometry_shader = PipelineGeometryShader::kQuadList;
-      primitive_topology = PipelinePrimitiveTopology::kLineListWithAdjacency;
-      break;
-    default:
-      // TODO(Triang3l): All primitive types and tessellation.
-      return false;
+
+  // Handle tessellated and non-tessellated draws separately, like D3D12.
+  if (primitive_processing_result.IsTessellated()) {
+    // Tessellation is enabled - use patch list topology.
+    primitive_topology = PipelinePrimitiveTopology::kPatchList;
+
+    // Get tessellation mode from registers.
+    auto vgt_hos_cntl = regs.Get<reg::VGT_HOS_CNTL>();
+    switch (vgt_hos_cntl.tess_mode) {
+      case xenos::TessellationMode::kDiscrete:
+        description_out.tessellation_mode = PipelineTessellationMode::kDiscrete;
+        break;
+      case xenos::TessellationMode::kContinuous:
+        description_out.tessellation_mode =
+            PipelineTessellationMode::kContinuous;
+        break;
+      case xenos::TessellationMode::kAdaptive:
+        description_out.tessellation_mode = PipelineTessellationMode::kAdaptive;
+        break;
+      default:
+        // Unknown tessellation mode, fall back to discrete.
+        description_out.tessellation_mode = PipelineTessellationMode::kDiscrete;
+        break;
+    }
+
+    // Determine patch type based on primitive type.
+    switch (primitive_processing_result.host_primitive_type) {
+      case xenos::PrimitiveType::kTriangleList:
+      case xenos::PrimitiveType::kTrianglePatch:
+        description_out.tessellation_patch =
+            PipelineTessellationPatchType::kTriangle;
+        break;
+      case xenos::PrimitiveType::kQuadList:
+      case xenos::PrimitiveType::kQuadPatch:
+        description_out.tessellation_patch =
+            PipelineTessellationPatchType::kQuad;
+        break;
+      default:
+        XELOGE("VulkanPipelineCache: Unsupported tessellated primitive type {}",
+               uint32_t(primitive_processing_result.host_primitive_type));
+        return false;
+    }
+  } else {
+    // Non-tessellated draw.
+    switch (primitive_processing_result.host_primitive_type) {
+      case xenos::PrimitiveType::kPointList:
+        geometry_shader = PipelineGeometryShader::kPointList;
+        primitive_topology = PipelinePrimitiveTopology::kPointList;
+        break;
+      case xenos::PrimitiveType::kLineList:
+        primitive_topology = PipelinePrimitiveTopology::kLineList;
+        break;
+      case xenos::PrimitiveType::kLineStrip:
+        primitive_topology = PipelinePrimitiveTopology::kLineStrip;
+        break;
+      case xenos::PrimitiveType::kTriangleList:
+        primitive_topology = PipelinePrimitiveTopology::kTriangleList;
+        break;
+      case xenos::PrimitiveType::kTriangleFan:
+        // The check should be performed at primitive processing time.
+        assert_true(device_properties.triangleFans);
+        primitive_topology = PipelinePrimitiveTopology::kTriangleFan;
+        break;
+      case xenos::PrimitiveType::kTriangleStrip:
+        primitive_topology = PipelinePrimitiveTopology::kTriangleStrip;
+        break;
+      case xenos::PrimitiveType::kRectangleList:
+        // Only use geometry shader if not using the fallback AsTriangleStrip
+        // vertex shader type (which is used when geometry shaders aren't
+        // supported).
+        if (primitive_processing_result.host_vertex_shader_type !=
+            Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
+          geometry_shader = PipelineGeometryShader::kRectangleList;
+        }
+        primitive_topology = PipelinePrimitiveTopology::kTriangleList;
+        break;
+      case xenos::PrimitiveType::kQuadList:
+        geometry_shader = PipelineGeometryShader::kQuadList;
+        primitive_topology = PipelinePrimitiveTopology::kLineListWithAdjacency;
+        break;
+      default:
+        // TODO(Triang3l): Remaining primitive types.
+        return false;
+    }
   }
   description_out.geometry_shader = geometry_shader;
   description_out.primitive_topology = primitive_topology;
@@ -764,12 +968,15 @@ bool VulkanPipelineCache::GetGeometryShaderKey(
   // For kPointListAsTriangleStrip, output_point_parameters has a different
   // meaning (the coordinates, not the size). However, the AsTriangleStrip host
   // vertex shader types are needed specifically when geometry shaders are not
-  // supported as fallbacks.
+  // supported as fallbacks - in that case, geometry_shader_type should be kNone
+  // and this function shouldn't be called.
   if (vertex_shader_modification.vertex.host_vertex_shader_type ==
           Shader::HostVertexShaderType::kPointListAsTriangleStrip ||
       vertex_shader_modification.vertex.host_vertex_shader_type ==
           Shader::HostVertexShaderType::kRectangleListAsTriangleStrip) {
-    assert_always();
+    XELOGE(
+        "GetGeometryShaderKey: AsTriangleStrip vertex shader types should not "
+        "be used with geometry shaders");
     return false;
   }
   GeometryShaderKey key;
@@ -778,15 +985,14 @@ bool VulkanPipelineCache::GetGeometryShaderKey(
   // real counts here.
   key.interpolator_count =
       xe::bit_count(vertex_shader_modification.vertex.interpolator_mask);
-  key.user_clip_plane_count =
-      /* vertex_shader_modification.vertex.user_clip_plane_count */ 0;
-  key.user_clip_plane_cull =
-      /* vertex_shader_modification.vertex.user_clip_plane_cull */ 0;
   key.has_vertex_kill_and =
       /* vertex_shader_modification.vertex.vertex_kill_and */ 0;
   key.has_point_size =
       vertex_shader_modification.vertex.output_point_parameters;
   key.has_point_coordinates = pixel_shader_modification.pixel.param_gen_point;
+  // Single bit to indicate if clip planes are enabled.
+  key.has_user_clip_planes =
+      uint32_t(vertex_shader_modification.vertex.user_clip_plane_count > 0);
   key_out = key;
   return true;
 }
@@ -831,13 +1037,15 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
       assert_unhandled_case(key.type);
   }
 
+  // When enabled, use max size to reduce variants from different counts.
+  constexpr uint32_t kMaxUserClipPlanes = 6;
   uint32_t clip_distance_count =
-      key.user_clip_plane_cull ? 0 : key.user_clip_plane_count;
+      key.has_user_clip_planes ? kMaxUserClipPlanes : 0;
   uint32_t cull_distance_count =
-      (key.user_clip_plane_cull ? key.user_clip_plane_count : 0) +
+      (key.has_user_clip_planes ? kMaxUserClipPlanes : 0) +
       key.has_vertex_kill_and;
 
-  SpirvBuilder builder(spv::Spv_1_0,
+  SpirvBuilder builder(spv::Spv_1_5,
                        (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
                        nullptr);
   spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
@@ -955,16 +1163,16 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
       builder.makeStructType(id_vector_temp, "gl_PerVertex");
   builder.addMemberName(type_struct_in_gl_per_vertex,
                         member_in_gl_per_vertex_position, "gl_Position");
-  builder.addMemberDecoration(type_struct_in_gl_per_vertex,
-                              member_in_gl_per_vertex_position,
-                              spv::DecorationBuiltIn, spv::BuiltInPosition);
+  builder.addMemberDecoration(
+      type_struct_in_gl_per_vertex, member_in_gl_per_vertex_position,
+      spv::DecorationBuiltIn, static_cast<int>(spv::BuiltIn::Position));
   if (clip_distance_count) {
     builder.addMemberName(type_struct_in_gl_per_vertex,
                           member_in_gl_per_vertex_clip_distance,
                           "gl_ClipDistance");
     builder.addMemberDecoration(
         type_struct_in_gl_per_vertex, member_in_gl_per_vertex_clip_distance,
-        spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+        spv::DecorationBuiltIn, static_cast<int>(spv::BuiltIn::ClipDistance));
   }
   if (cull_distance_count) {
     builder.addMemberName(type_struct_in_gl_per_vertex,
@@ -972,7 +1180,7 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
                           "gl_CullDistance");
     builder.addMemberDecoration(
         type_struct_in_gl_per_vertex, member_in_gl_per_vertex_cull_distance,
-        spv::DecorationBuiltIn, spv::BuiltInCullDistance);
+        spv::DecorationBuiltIn, static_cast<int>(spv::BuiltIn::CullDistance));
   }
   builder.addDecoration(type_struct_in_gl_per_vertex, spv::DecorationBlock);
   spv::Id type_array_in_gl_per_vertex = builder.makeArrayType(
@@ -1063,16 +1271,16 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
       builder.makeStructType(id_vector_temp, "gl_PerVertex");
   builder.addMemberName(type_struct_out_gl_per_vertex,
                         member_out_gl_per_vertex_position, "gl_Position");
-  builder.addMemberDecoration(type_struct_out_gl_per_vertex,
-                              member_out_gl_per_vertex_position,
-                              spv::DecorationBuiltIn, spv::BuiltInPosition);
+  builder.addMemberDecoration(
+      type_struct_out_gl_per_vertex, member_out_gl_per_vertex_position,
+      spv::DecorationBuiltIn, static_cast<int>(spv::BuiltIn::Position));
   if (clip_distance_count) {
     builder.addMemberName(type_struct_out_gl_per_vertex,
                           member_out_gl_per_vertex_clip_distance,
                           "gl_ClipDistance");
     builder.addMemberDecoration(
         type_struct_out_gl_per_vertex, member_out_gl_per_vertex_clip_distance,
-        spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+        spv::DecorationBuiltIn, static_cast<int>(spv::BuiltIn::ClipDistance));
   }
   builder.addDecoration(type_struct_out_gl_per_vertex, spv::DecorationBlock);
   spv::Id out_gl_per_vertex =
@@ -1767,6 +1975,55 @@ VkShaderModule VulkanPipelineCache::GetGeometryShader(GeometryShaderKey key) {
   return shader_module;
 }
 
+VkShaderModule VulkanPipelineCache::GetTessellationControlShader(
+    PipelineTessellationMode mode, PipelineTessellationPatchType patch_type,
+    bool use_control_point_count) const {
+  if (mode == PipelineTessellationMode::kNone ||
+      patch_type == PipelineTessellationPatchType::kNone) {
+    return VK_NULL_HANDLE;
+  }
+
+  switch (mode) {
+    case PipelineTessellationMode::kDiscrete:
+      if (patch_type == PipelineTessellationPatchType::kTriangle) {
+        return use_control_point_count ? discrete_triangle_3cp_hs_
+                                       : discrete_triangle_1cp_hs_;
+      } else {
+        return use_control_point_count ? discrete_quad_4cp_hs_
+                                       : discrete_quad_1cp_hs_;
+      }
+    case PipelineTessellationMode::kContinuous:
+      if (patch_type == PipelineTessellationPatchType::kTriangle) {
+        return use_control_point_count ? continuous_triangle_3cp_hs_
+                                       : continuous_triangle_1cp_hs_;
+      } else {
+        return use_control_point_count ? continuous_quad_4cp_hs_
+                                       : continuous_quad_1cp_hs_;
+      }
+    case PipelineTessellationMode::kAdaptive:
+      // Adaptive mode always uses per-corner control points.
+      if (patch_type == PipelineTessellationPatchType::kTriangle) {
+        return adaptive_triangle_hs_;
+      } else {
+        return adaptive_quad_hs_;
+      }
+    default:
+      return VK_NULL_HANDLE;
+  }
+}
+
+VkShaderModule VulkanPipelineCache::GetTessellationVertexShader(
+    PipelineTessellationMode mode) const {
+  if (mode == PipelineTessellationMode::kNone) {
+    return VK_NULL_HANDLE;
+  }
+  // Adaptive mode reads edge factors from index buffer; other modes pass
+  // vertex indices.
+  return (mode == PipelineTessellationMode::kAdaptive)
+             ? tessellation_adaptive_vs_
+             : tessellation_indexed_vs_;
+}
+
 bool VulkanPipelineCache::EnsurePipelineCreated(
     const PipelineCreationArguments& creation_arguments) {
   if (creation_arguments.pipeline->second.pipeline != VK_NULL_HANDLE) {
@@ -1802,26 +2059,77 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
       render_target_cache_.GetPath() ==
       RenderTargetCache::Path::kPixelShaderInterlock;
 
-  std::array<VkPipelineShaderStageCreateInfo, 3> shader_stages;
+  bool is_tessellated =
+      description.tessellation_mode != PipelineTessellationMode::kNone;
+
+  // Up to 5 shader stages: VS, TCS, TES, GS, FS.
+  std::array<VkPipelineShaderStageCreateInfo, 5> shader_stages;
   uint32_t shader_stage_count = 0;
 
-  // Vertex or tessellation evaluation shader.
+  // Vertex shader or tessellation evaluation shader.
   assert_true(creation_arguments.vertex_shader->is_translated());
   if (!creation_arguments.vertex_shader->is_valid()) {
     return false;
   }
-  VkPipelineShaderStageCreateInfo& shader_stage_vertex =
-      shader_stages[shader_stage_count++];
-  shader_stage_vertex.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-  shader_stage_vertex.pNext = nullptr;
-  shader_stage_vertex.flags = 0;
-  shader_stage_vertex.stage = VK_SHADER_STAGE_VERTEX_BIT;
-  shader_stage_vertex.module =
-      creation_arguments.vertex_shader->shader_module();
-  assert_true(shader_stage_vertex.module != VK_NULL_HANDLE);
-  shader_stage_vertex.pName = "main";
-  shader_stage_vertex.pSpecializationInfo = nullptr;
+
+  if (is_tessellated) {
+    // For tessellation: use our pre-compiled VS for passing data to TCS,
+    // then TCS (hull shader), then the translated Xenos vertex shader as TES
+    // (domain shader).
+
+    // Tessellation vertex shader (passes indices to TCS).
+    VkPipelineShaderStageCreateInfo& shader_stage_tess_vs =
+        shader_stages[shader_stage_count++];
+    shader_stage_tess_vs.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_tess_vs.pNext = nullptr;
+    shader_stage_tess_vs.flags = 0;
+    shader_stage_tess_vs.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_stage_tess_vs.module = creation_arguments.tessellation_vertex_shader;
+    shader_stage_tess_vs.pName = "main";
+    shader_stage_tess_vs.pSpecializationInfo = nullptr;
+
+    // Tessellation control shader (hull shader).
+    VkPipelineShaderStageCreateInfo& shader_stage_tcs =
+        shader_stages[shader_stage_count++];
+    shader_stage_tcs.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_tcs.pNext = nullptr;
+    shader_stage_tcs.flags = 0;
+    shader_stage_tcs.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+    shader_stage_tcs.module = creation_arguments.tessellation_control_shader;
+    shader_stage_tcs.pName = "main";
+    shader_stage_tcs.pSpecializationInfo = nullptr;
+
+    // Tessellation evaluation shader (domain shader) - the translated Xenos
+    // vertex shader.
+    VkPipelineShaderStageCreateInfo& shader_stage_tes =
+        shader_stages[shader_stage_count++];
+    shader_stage_tes.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_tes.pNext = nullptr;
+    shader_stage_tes.flags = 0;
+    shader_stage_tes.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    shader_stage_tes.module = creation_arguments.vertex_shader->shader_module();
+    assert_true(shader_stage_tes.module != VK_NULL_HANDLE);
+    shader_stage_tes.pName = "main";
+    shader_stage_tes.pSpecializationInfo = nullptr;
+  } else {
+    // Non-tessellated: standard vertex shader.
+    VkPipelineShaderStageCreateInfo& shader_stage_vertex =
+        shader_stages[shader_stage_count++];
+    shader_stage_vertex.sType =
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    shader_stage_vertex.pNext = nullptr;
+    shader_stage_vertex.flags = 0;
+    shader_stage_vertex.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    shader_stage_vertex.module =
+        creation_arguments.vertex_shader->shader_module();
+    assert_true(shader_stage_vertex.module != VK_NULL_HANDLE);
+    shader_stage_vertex.pName = "main";
+    shader_stage_vertex.pSpecializationInfo = nullptr;
+  }
+
   // Geometry shader.
   if (creation_arguments.geometry_shader != VK_NULL_HANDLE) {
     VkPipelineShaderStageCreateInfo& shader_stage_geometry =
@@ -2137,6 +2445,27 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
         VK_DYNAMIC_STATE_STENCIL_REFERENCE;
   }
 
+  // Tessellation state (only used when tessellation is active).
+  VkPipelineTessellationStateCreateInfo tessellation_state = {};
+  tessellation_state.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+  if (is_tessellated) {
+    // Determine patch control point count based on mode and patch type.
+    // For adaptive mode, we use the actual patch corner count (3 for triangles,
+    // 4 for quads) since each control point has its own edge factor.
+    // For discrete/continuous modes, we use 1 control point (the Xenos vertex
+    // shader receives the patch index and computes all corners internally).
+    if (description.tessellation_mode == PipelineTessellationMode::kAdaptive) {
+      tessellation_state.patchControlPoints =
+          (description.tessellation_patch ==
+           PipelineTessellationPatchType::kTriangle)
+              ? 3
+              : 4;
+    } else {
+      tessellation_state.patchControlPoints = 1;
+    }
+  }
+
   VkGraphicsPipelineCreateInfo pipeline_create_info;
   pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipeline_create_info.pNext = nullptr;
@@ -2145,7 +2474,8 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   pipeline_create_info.pStages = shader_stages.data();
   pipeline_create_info.pVertexInputState = &vertex_input_state;
   pipeline_create_info.pInputAssemblyState = &input_assembly_state;
-  pipeline_create_info.pTessellationState = nullptr;
+  pipeline_create_info.pTessellationState =
+      is_tessellated ? &tessellation_state : nullptr;
   pipeline_create_info.pViewportState = &viewport_state;
   pipeline_create_info.pRasterizationState = &rasterization_state;
   pipeline_create_info.pMultisampleState = &multisample_state;
@@ -2162,19 +2492,23 @@ bool VulkanPipelineCache::EnsurePipelineCreated(
   const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
   const VkDevice device = vulkan_device->device();
   VkPipeline pipeline;
-  if (dfn.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
-                                    &pipeline_create_info, nullptr,
-                                    &pipeline) != VK_SUCCESS) {
-    // TODO(Triang3l): Move these error messages outside.
-    /* if (creation_arguments.pixel_shader) {
+  VkResult result = dfn.vkCreateGraphicsPipelines(
+      device, vk_pipeline_cache_, 1, &pipeline_create_info, nullptr, &pipeline);
+  if (result != VK_SUCCESS) {
+    if (creation_arguments.pixel_shader) {
       XELOGE(
-          "Failed to create graphics pipeline with VS {:016X}, PS {:016X}",
+          "Failed to create graphics pipeline with VS {:016X}, PS {:016X} "
+          "(tessellated={}, result={})",
           creation_arguments.vertex_shader->shader().ucode_data_hash(),
-          creation_arguments.pixel_shader->shader().ucode_data_hash());
+          creation_arguments.pixel_shader->shader().ucode_data_hash(),
+          is_tessellated, static_cast<int>(result));
     } else {
-      XELOGE("Failed to create graphics pipeline with VS {:016X}",
-             creation_arguments.vertex_shader->shader().ucode_data_hash());
-    } */
+      XELOGE(
+          "Failed to create graphics pipeline with VS {:016X} "
+          "(tessellated={}, result={})",
+          creation_arguments.vertex_shader->shader().ucode_data_hash(),
+          is_tessellated, static_cast<int>(result));
+    }
     return false;
   }
   creation_arguments.pipeline->second.pipeline = pipeline;

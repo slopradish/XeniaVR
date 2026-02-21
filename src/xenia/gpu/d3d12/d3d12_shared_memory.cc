@@ -18,14 +18,8 @@
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
-DEFINE_bool(d3d12_tiled_shared_memory, true,
-            "Enable tiled resources for shared memory emulation. Disabling "
-            "them increases video memory usage - a 512 MB buffer is created - "
-            "but allows graphics debuggers that don't support tiled resources "
-            "to work.",
-            "D3D12");
-
 DECLARE_bool(gpu_allow_invalid_upload_range);
+DECLARE_bool(tiled_shared_memory);
 
 namespace xe {
 namespace gpu {
@@ -50,7 +44,7 @@ bool D3D12SharedMemory::Initialize() {
   ui::d3d12::util::FillBufferResourceDesc(
       buffer_desc, kBufferSize, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
   buffer_state_ = D3D12_RESOURCE_STATE_COPY_DEST;
-  if (cvars::d3d12_tiled_shared_memory &&
+  if (cvars::tiled_shared_memory &&
       provider.GetTiledResourcesTier() !=
           D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED &&
       !provider.GetGraphicsAnalysis()) {
@@ -422,17 +416,24 @@ bool D3D12SharedMemory::UploadRanges(
                                   upload_range_length << page_size_log2());
 
     if (upload_range_length > 0 && !cvars::gpu_allow_invalid_upload_range) {
+      // Check both start and end of the range for unmapped memory.
+      const uint32_t range_start_addr = upload_range_start << page_size_log2();
       const uint32_t upload_range_last_page =
           upload_range_start + upload_range_length - 1;
+      const uint32_t range_end_addr = upload_range_last_page
+                                      << page_size_log2();
 
-      const memory::PageAccess page_access =
-          memory().GetPhysicalHeap()->QueryRangeAccess(
-              upload_range_last_page << page_size_log2(),
-              upload_range_last_page
-                  << page_size_log2());  // Check only last page
+      const memory::PageAccess start_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(range_start_addr,
+                                                       range_start_addr);
+      const memory::PageAccess end_access =
+          memory().GetPhysicalHeap()->QueryRangeAccess(range_end_addr,
+                                                       range_end_addr);
 
-      if (page_access == xe::memory::PageAccess::kNoAccess) {
-        XELOGE("Invalid upload range for GPU: {:08X}", upload_range_start);
+      if (start_access == xe::memory::PageAccess::kNoAccess ||
+          end_access == xe::memory::PageAccess::kNoAccess) {
+        XELOGE("Invalid upload range for GPU: {:08X} length {:08X}",
+               upload_range_start, upload_range_length);
         return false;
       }
     }

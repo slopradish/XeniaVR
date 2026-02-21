@@ -153,9 +153,65 @@ vs_version = import_vs_environment()
 
 default_branch = "canary_experimental"
 
+def setup_vulkan_sdk():
+    """Setup Vulkan SDK environment variables if not already set.
+
+    Returns:
+        True if Vulkan SDK is available and valid, False otherwise.
+    """
+    # Check if VULKAN_SDK is already set and valid
+    existing_vulkan_sdk = os.environ.get("VULKAN_SDK")
+    if existing_vulkan_sdk:
+        if os.path.exists(existing_vulkan_sdk):
+            if has_bin("spirv-opt"):
+                print(f"VULKAN_SDK is set to {existing_vulkan_sdk}")
+                return True
+            print_warning(f"VULKAN_SDK is set to {existing_vulkan_sdk} but spirv-opt not found in PATH")
+        else:
+            print_warning(f"VULKAN_SDK is set to {existing_vulkan_sdk} but directory does not exist")
+        return False
+
+    if sys.platform != "win32":
+        # On Linux, find spirv-opt in PATH and set VULKAN_SDK based on its location
+        spirv_opt_path = get_bin("spirv-opt")
+        if spirv_opt_path:
+            # spirv-opt is typically in $VULKAN_SDK/bin/, so get parent directory
+            spirv_bin_dir = os.path.dirname(spirv_opt_path)
+            vulkan_sdk = os.path.dirname(spirv_bin_dir)
+            os.environ["VULKAN_SDK"] = vulkan_sdk
+            print(f"Found Vulkan SDK at {vulkan_sdk} (from spirv-opt location)")
+            return True
+        return False
+
+    # Windows: Check if Vulkan SDK is installed at the default location
+    vulkan_base = "C:\\VulkanSDK"
+    if not os.path.exists(vulkan_base):
+        return False
+
+    try:
+        subdirs = [d for d in os.listdir(vulkan_base)
+                   if os.path.isdir(os.path.join(vulkan_base, d))]
+        if not subdirs:
+            return False
+
+        vulkan_sdk = os.path.join(vulkan_base, subdirs[0])
+        vulkan_bin = os.path.join(vulkan_sdk, "Bin")
+
+        os.environ["VULKAN_SDK"] = vulkan_sdk
+        os.environ["PATH"] = f"{vulkan_bin}{os.pathsep}{os.environ['PATH']}"
+
+        print(f"Found Vulkan SDK at {vulkan_sdk}")
+        return True
+    except Exception:
+        return False
+
+
 def main():
     # Add self to the root search path.
     sys.path.insert(0, self_path)
+
+    # Setup Vulkan SDK and check if available
+    setup_vulkan_sdk()
 
     # Augment path to include our fancy things.
     os.environ["PATH"] += os.pathsep + os.pathsep.join([
@@ -473,26 +529,48 @@ def get_clang_format_binary():
     Returns:
       A path to the clang-format executable.
     """
-    clang_format_version_req = "19"
-    attempts = [
-        f"clang-format-{clang_format_version_req}",
-        "clang-format",
-        ]
+    clang_format_version_min = 19
+
+    # Build list of all potential clang-format binaries
+    all_binaries = []
+
+    # Check versioned binaries from 21 down to min, preferring newer
+    for version in range(21, clang_format_version_min - 1, -1):
+        binary = f"clang-format-{version}"
+        if has_bin(binary):
+            all_binaries.append(binary)
+
+    # Also check generic clang-format
+    all_binaries.append("clang-format")
+
+    # Add Windows-specific paths
     if sys.platform == "win32":
         if "VCINSTALLDIR" in os.environ:
-            attempts.append(os.path.join(os.environ["VCINSTALLDIR"], "Tools", "Llvm", "x64", "bin", "clang-format.exe"))
-            attempts.append(os.path.join(os.environ["VCINSTALLDIR"], "Tools", "Llvm", "arm64", "bin", "clang-format.exe"))
-        attempts.append(os.path.join(os.environ["ProgramFiles"], "LLVM", "bin", "clang-format.exe"))
-    for binary in attempts:
+            all_binaries.append(os.path.join(os.environ["VCINSTALLDIR"], "Tools", "Llvm", "x64", "bin", "clang-format.exe"))
+            all_binaries.append(os.path.join(os.environ["VCINSTALLDIR"], "Tools", "Llvm", "arm64", "bin", "clang-format.exe"))
+        all_binaries.append(os.path.join(os.environ["ProgramFiles"], "LLVM", "bin", "clang-format.exe"))
+
+    # Find the highest version available
+    best_binary = None
+    best_version = 0
+
+    for binary in all_binaries:
         if has_bin(binary):
             try:
                 clang_format_out = subprocess.check_output([binary, "--version"], text=True)
+                version = int(clang_format_out.split("version ")[1].split(".")[0])
+                if version >= clang_format_version_min and version > best_version:
+                    best_version = version
+                    best_binary = binary
+                    best_output = clang_format_out
             except:
                 continue
-            if int(clang_format_out.split("version ")[1].split(".")[0]) == int(clang_format_version_req):
-                print(clang_format_out)
-                return binary
-    print_error(f"clang-format {clang_format_version_req} is not on PATH")
+
+    if best_binary:
+        print(best_output)
+        return best_binary
+
+    print_error(f"clang-format {clang_format_version_min} or newer is not on PATH")
     sys.exit(1)
 
 
@@ -539,7 +617,7 @@ def run_premake(target_os, action, cc=None):
         os.path.join("tools", "build", "premake.py"),
         "--file=premake5.lua",
         f"--os={target_os}",
-        #"--test-suite-mode=combined",
+        "--test-suite-mode=combined",
         "--verbose",
         action,
     ]
@@ -959,8 +1037,9 @@ class BuildShadersCommand(Command):
         # well as to enable `#include` in GLSL, to include `xesl.xesli` itself,
         # without writing the same `#if` / `#extension` / `#endif` in every
         # shader). Also, not all shading languages provide a built-in
-        # preprocessor definition for identification of them, so XESL_LANGUAGE_*
-        # is also defined via the build arguments. XESL_LANGUAGE_* is set
+        # preprocessor definition for identification of them, so
+        # SHADING_LANGUAGE_*_XE is also defined via the build arguments.
+        # SHADING_LANGUAGE_*_XE is set
         # regardless of whether the file is XeSL or a raw source file in a
         # specific language, as XeSL headers may be used in language-specific
         # sources.
@@ -1004,7 +1083,7 @@ class BuildShadersCommand(Command):
                     # clutter in this case.
                     if subprocess.call([
                            fxc,
-                           "/D", "XESL_LANGUAGE_HLSL=1",
+                           "/D", "SHADING_LANGUAGE_HLSL_XE=1",
                            "/Fh", f"{dxbc_file_path_base}.h",
                            "/T", f"{dxbc_stage}_5_1",
                            "/Vn", dxbc_identifier,
@@ -1043,10 +1122,6 @@ class BuildShadersCommand(Command):
             spirv_opt = os.path.join(vulkan_bin_path, "spirv-opt")
             if not has_bin(spirv_opt):
                 print_error("could not find spirv-opt")
-                return 1
-            spirv_remap = os.path.join(vulkan_bin_path, "spirv-remap")
-            if not has_bin(spirv_remap):
-                print_error("could not find spirv-remap")
                 return 1
             spirv_dis = os.path.join(vulkan_bin_path, "spirv-dis")
             if not has_bin(spirv_dis):
@@ -1092,7 +1167,7 @@ class BuildShadersCommand(Command):
                 # --stdin must be before -S for some reason.
                 glslang_arguments = [glslang,
                                      "--stdin" if src_is_xesl else src_path,
-                                     "-DXESL_LANGUAGE_GLSL=1",
+                                     "-DSHADING_LANGUAGE_GLSL_XE=1",
                                      "-S", spirv_stage,
                                      "-o", spirv_glslang_file_path,
                                      "-V"]
@@ -1112,22 +1187,13 @@ class BuildShadersCommand(Command):
                 if subprocess.call([
                        spirv_opt,
                        "-O",
+                       "--canonicalize-ids",
                        spirv_glslang_file_path,
                        "-o", spirv_file_path,
                        ]) != 0:
                     print_error("failed to optimize a SPIR-V shader")
                     return 1
                 os.remove(spirv_glslang_file_path)
-                # spirv-remap takes the output directory, but it may be the same
-                # as the one the input is stored in.
-                if subprocess.call([
-                       spirv_remap,
-                       "--do-everything",
-                       "-i", spirv_file_path,
-                       "-o", spirv_dir_path,
-                       ]) != 0:
-                    print_error("failed to remap a SPIR-V shader")
-                    return 1
                 spirv_dis_file_path = f"{spirv_file_path_base}.txt"
                 if subprocess.call([
                        spirv_dis,
@@ -1218,12 +1284,20 @@ class TestCommand(BaseBuildCommand):
                 print_error(f"Unable to find {test_targets[i]} - build it.")
                 return 1
 
+        # Prepare environment with Qt bin directory in PATH if available
+        test_env = dict(os.environ)
+        qt_dir = os.environ.get("QT_DIR")
+        if qt_dir and sys.platform == "win32":
+            qt_bin = os.path.join(qt_dir, "bin")
+            if os.path.exists(qt_bin):
+                test_env["PATH"] = f"{qt_bin}{os.pathsep}{test_env['PATH']}"
+                print(f"- Qt bin directory added to PATH: {qt_bin}\n")
+
         # Run tests.
         any_failed = False
         for test_executable in test_executables:
             print(f"- {test_executable}")
-            result = shell_call([test_executable] + pass_args,
-                                throw_on_error=False)
+            result = subprocess.call([test_executable] + pass_args, env=test_env)
             if result:
                 any_failed = True
                 if args["continue"]:
@@ -1254,8 +1328,6 @@ class GenTestsCommand(Command):
             *args, **kwargs)
 
     def process_src_file(test_bin, ppc_as, ppc_objdump, ppc_ld, ppc_nm, src_file):
-        print(f"- {src_file}")
-
         def make_unix_path(p):
             """Forces a unix path separator style, as required by binutils.
             """
@@ -1268,7 +1340,7 @@ class GenTestsCommand(Command):
             "-a32",
             "-be",
             "-mregnames",
-            "-mpower7",
+            "-ma2",
             "-maltivec",
             "-mvsx",
             "-mvmx128",
@@ -1280,7 +1352,7 @@ class GenTestsCommand(Command):
         shell_call([
             ppc_objdump,
             "--adjust-vma=0x100000",
-            "-Mpower7",
+            "-Ma2",
             "-Mvmx128",
             "-D",
             "-EB",
@@ -1309,26 +1381,43 @@ class GenTestsCommand(Command):
             make_unix_path(obj_file),
             ], stdout_path=f"{os.path.join(test_bin, src_name)}.map")
 
+        return src_file
+
     def execute(self, args, pass_args, cwd):
         print("Generating test binaries...\n")
 
-        if sys.platform == "win32":
-            binutils_path = os.path.join("third_party", "binutils-ppc-cygwin")
-        else:
-            binutils_path = os.path.join("third_party", "binutils", "bin")
+        # Use the same binutils path on all platforms
+        binutils_path = os.path.join("third_party", "binutils", "bin")
 
         ppc_as = os.path.join(binutils_path, "powerpc-none-elf-as")
         ppc_ld = os.path.join(binutils_path, "powerpc-none-elf-ld")
         ppc_objdump = os.path.join(binutils_path, "powerpc-none-elf-objdump")
         ppc_nm = os.path.join(binutils_path, "powerpc-none-elf-nm")
 
-        if not os.path.exists(ppc_as) and sys.platform == "linux":
+        # Check if binutils exists (with .exe on Windows)
+        ppc_as_check = ppc_as + (".exe" if sys.platform == "win32" else "")
+        if not os.path.exists(ppc_as_check):
             print("Binaries are missing, binutils build required\n")
-            shell_script = os.path.join("third_party", "binutils", "build.sh")
-            # Set executable bit for build script before running it
-            os.chmod(shell_script, stat.S_IRUSR | stat.S_IWUSR |
-                     stat.S_IXUSR | stat.S_IRGRP | stat.S_IROTH)
-            shell_call([shell_script])
+            binutils_dir = os.path.join("third_party", "binutils")
+            shell_script = "build.sh"
+
+            # Save current directory
+            original_dir = os.getcwd()
+
+            if sys.platform == "linux":
+                # Set executable bit for build script before running it
+                os.chdir(binutils_dir)
+                os.chmod(shell_script, stat.S_IRUSR | stat.S_IWUSR |
+                         stat.S_IXUSR | stat.S_IRGRP | stat.S_IROTH)
+                shell_call([f"./{shell_script}"])
+                os.chdir(original_dir)
+            elif sys.platform == "win32":
+                # On Windows, add Cygwin to PATH and run bash
+                cygwin_bin = r"C:\cygwin64\bin"
+                os.environ["PATH"] = f"{cygwin_bin}{os.pathsep}{os.environ['PATH']}"
+                os.chdir(binutils_dir)
+                shell_call(["bash", shell_script])
+                os.chdir(original_dir)
 
         test_src = os.path.join("src", "xenia", "cpu", "ppc", "testing")
         test_bin = os.path.join(test_src, "bin")
@@ -1347,8 +1436,8 @@ class GenTestsCommand(Command):
 
         pool_func = partial(GenTestsCommand.process_src_file, test_bin, ppc_as, ppc_objdump, ppc_ld, ppc_nm)
         with Pool() as pool:
-            pool.map(pool_func, src_files)
-
+            for src_file in pool.imap_unordered(pool_func, src_files):
+                print(f"- {src_file}")
 
         if any_errors:
             print_error("failed to build one or more tests.")
@@ -1651,12 +1740,17 @@ class FormatCommand(Command):
                 return 0
         else:
             print("- git-clang-format")
-            shell_call([
+            ret = shell_call([
                 sys.executable,
                 "third_party/clang-format/git-clang-format",
                 f"--binary={clang_format_binary}",
                 f"--commit={'origin/canary_experimental' if args['origin'] else 'HEAD'}",
-                ])
+                ], throw_on_error=False)
+            if ret != 0:
+                print("\nFiles were formatted. Please stage the changes:")
+                print("  git status")
+                print("  git add <files>")
+                return 1
             print("")
 
         return 0

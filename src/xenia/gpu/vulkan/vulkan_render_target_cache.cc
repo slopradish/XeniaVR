@@ -19,8 +19,10 @@
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/gpu/draw_util.h"
+#include "xenia/gpu/gpu_flags.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/spirv_builder.h"
+#include "xenia/gpu/spirv_compatibility.h"
 #include "xenia/gpu/spirv_shader_translator.h"
 #include "xenia/gpu/texture_cache.h"
 #include "xenia/gpu/vulkan/deferred_command_buffer.h"
@@ -518,6 +520,7 @@ bool VulkanRenderTargetCache::Initialize(uint32_t shared_memory_binding_count) {
     // Host render targets.
 
     depth_float24_round_ = cvars::depth_float24_round;
+    gamma_render_target_as_srgb_ = cvars::gamma_render_target_as_srgb;
 
     // Host depth storing pipeline layout.
     VkDescriptorSetLayout host_depth_store_descriptor_set_layouts[] = {
@@ -1061,13 +1064,6 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
       uint32_t dump_pitch;
       resolve_info.GetCopyEdramTileSpan(dump_base, dump_row_length_used,
                                         dump_rows, dump_pitch);
-      // Scale tile parameters for resolution scaling to match resolve shader
-      // expectations
-      if (IsDrawResolutionScaled()) {
-        dump_row_length_used *= draw_resolution_scale_x();
-        dump_rows *= draw_resolution_scale_y();
-        dump_pitch *= draw_resolution_scale_x();
-      }
       DumpRenderTargets(dump_base, dump_row_length_used, dump_rows, dump_pitch);
     }
 
@@ -1154,17 +1150,9 @@ bool VulkanRenderTargetCache::Resolve(const Memory& memory,
                   draw_resolution_scale_x() * draw_resolution_scale_y();
               uint64_t scaled_offset =
                   uint64_t(dest_address) * draw_resolution_scale_area;
-
-              // Get the buffer's base offset to calculate relative offset
-              uint64_t buffer_relative_offset = 0;
-              size_t buffer_index =
-                  texture_cache.GetScaledResolveCurrentBufferIndex();
-              auto* buffer_info =
-                  texture_cache.GetScaledResolveBufferInfo(buffer_index);
-              if (buffer_info) {
-                buffer_relative_offset =
-                    scaled_offset - buffer_info->range_start_scaled;
-              }
+              uint64_t buffer_relative_offset =
+                  scaled_offset -
+                  texture_cache.GetCurrentScaledResolveBufferBaseOffset();
 
               write_descriptor_set_dest_buffer_info.buffer = scaled_buffer;
               write_descriptor_set_dest_buffer_info.offset =
@@ -1719,7 +1707,7 @@ VkFormat VulkanRenderTargetCache::GetColorVulkanFormat(
                                           : VK_FORMAT_R8G8B8A8_UNORM;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_AS_10_10_10_10:
-      return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+      return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT:
     case xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT_AS_16_16_16_16:
       return VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -2288,8 +2276,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
 
   std::vector<spv::Id> id_vector_temp;
   std::vector<unsigned int> uint_vector_temp;
-
-  SpirvBuilder builder(spv::Spv_1_0,
+  SpirvBuilder builder(spv::Spv_1_5,
                        (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
                        nullptr);
   spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
@@ -2405,7 +2392,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
           builder.createVariable(spv::NoPrecision, spv::StorageClassOutput,
                                  type_float, "gl_FragDepth");
       builder.addDecoration(output_fragment_depth, spv::DecorationBuiltIn,
-                            spv::BuiltInFragDepth);
+                            static_cast<int>(spv::BuiltIn::FragDepth));
       main_interface.push_back(output_fragment_depth);
       if (shader_uses_stencil_reference_output) {
         builder.addExtension("SPV_EXT_shader_stencil_export");
@@ -2413,9 +2400,9 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
         output_fragment_stencil_ref =
             builder.createVariable(spv::NoPrecision, spv::StorageClassOutput,
                                    type_int, "gl_FragStencilRefARB");
-        builder.addDecoration(output_fragment_stencil_ref,
-                              spv::DecorationBuiltIn,
-                              spv::BuiltInFragStencilRefEXT);
+        builder.addDecoration(
+            output_fragment_stencil_ref, spv::DecorationBuiltIn,
+            static_cast<int>(spv::BuiltIn::FragStencilRefEXT));
         main_interface.push_back(output_fragment_stencil_ref);
       }
       break;
@@ -2603,7 +2590,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
   spv::Id input_fragment_coord = builder.createVariable(
       spv::NoPrecision, spv::StorageClassInput, type_float4, "gl_FragCoord");
   builder.addDecoration(input_fragment_coord, spv::DecorationBuiltIn,
-                        spv::BuiltInFragCoord);
+                        static_cast<int>(spv::BuiltIn::FragCoord));
   main_interface.push_back(input_fragment_coord);
   spv::Id input_sample_id = spv::NoResult;
   spv::Id spec_const_sample_id = spv::NoResult;
@@ -2615,7 +2602,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
           spv::NoPrecision, spv::StorageClassInput, type_int, "gl_SampleID");
       builder.addDecoration(input_sample_id, spv::DecorationFlat);
       builder.addDecoration(input_sample_id, spv::DecorationBuiltIn,
-                            spv::BuiltInSampleId);
+                            static_cast<int>(spv::BuiltIn::SampleId));
       main_interface.push_back(input_sample_id);
     } else {
       // One sample per draw, with different sample masks.
@@ -3741,6 +3728,10 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
         }
       }
     }
+    // For stencil bit output, use stencil directly for the discard check.
+    if (packed == spv::NoResult && mode.output == TransferOutput::kStencilBit) {
+      packed = source_stencil[0];
+    }
     switch (mode.output) {
       case TransferOutput::kColor: {
         // Unless a special path was taken, unpack the raw 32bpp value into the
@@ -4277,7 +4268,7 @@ VkShaderModule VulkanRenderTargetCache::GetTransferShader(
         }
       } break;
       case TransferOutput::kStencilBit: {
-        if (packed) {
+        if (packed && !cvars::no_discard_stencil_in_transfer_pipelines) {
           // Kill the sample if the needed stencil bit is not set.
           assert_true(push_constants_member_stencil_mask != UINT32_MAX);
           id_vector_temp.clear();
@@ -5550,7 +5541,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
 
   std::vector<spv::Id> id_vector_temp;
 
-  SpirvBuilder builder(spv::Spv_1_0,
+  SpirvBuilder builder(spv::Spv_1_5,
                        (SpirvShaderTranslator::kSpirvMagicToolId << 16) | 1,
                        nullptr);
   spv::Id ext_inst_glsl_std_450 = builder.import("GLSL.std.450");
@@ -5649,7 +5640,7 @@ VkPipeline VulkanRenderTargetCache::GetDumpPipeline(DumpPipelineKey key) {
       builder.createVariable(spv::NoPrecision, spv::StorageClassInput,
                              type_uint3, "gl_GlobalInvocationID");
   builder.addDecoration(input_global_invocation_id, spv::DecorationBuiltIn,
-                        spv::BuiltInGlobalInvocationId);
+                        static_cast<int>(spv::BuiltIn::GlobalInvocationId));
 
   // Begin the main function.
   std::vector<spv::Id> main_param_types;

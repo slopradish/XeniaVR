@@ -36,6 +36,9 @@
 
 // Available audio systems:
 #include "xenia/apu/nop/nop_audio_system.h"
+#if XE_PLATFORM_LINUX
+#include "xenia/apu/alsa/alsa_audio_system.h"
+#endif  // XE_PLATFORM_LINUX
 #if !XE_PLATFORM_ANDROID
 #include "xenia/apu/sdl/sdl_audio_system.h"
 #endif  // !XE_PLATFORM_ANDROID
@@ -60,11 +63,23 @@
 #include "xenia/hid/xinput/xinput_hid.h"
 #endif  // XE_PLATFORM_WIN32
 
-DEFINE_string(apu, "any", "Audio system. Use: [any, nop, sdl, xaudio2]", "APU");
-DEFINE_string(gpu, "any", "Graphics system. Use: [any, d3d12, vulkan, null]",
-              "GPU");
-DEFINE_string(hid, "any", "Input system. Use: [any, nop, sdl, winkey, xinput]",
-              "HID");
+#if XE_PLATFORM_WIN32
+#define APU_OPTIONS "[any, nop, sdl, xaudio2]"
+#define GPU_OPTIONS "[any, d3d12, vulkan, null]"
+#define HID_OPTIONS "[any, nop, sdl, winkey, xinput]"
+#elif XE_PLATFORM_LINUX
+#define APU_OPTIONS "[any, alsa, nop, sdl]"
+#define GPU_OPTIONS "[any, vulkan, null]"
+#define HID_OPTIONS "[any, nop, sdl]"
+#else
+#define APU_OPTIONS "[any, nop, sdl]"
+#define GPU_OPTIONS "[any, vulkan, null]"
+#define HID_OPTIONS "[any, nop, sdl]"
+#endif
+
+DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
+DEFINE_string(gpu, "any", "Graphics system. Use: " GPU_OPTIONS, "GPU");
+DEFINE_string(hid, "any", "Input system. Use: " HID_OPTIONS, "HID");
 
 DEFINE_path(
     storage_root, "",
@@ -91,7 +106,10 @@ DEFINE_bool(mount_scratch, false, "Enable scratch mount", "Storage");
 DEFINE_bool(mount_cache, true, "Enable cache mount", "Storage");
 UPDATE_from_bool(mount_cache, 2024, 8, 31, 20, false);
 
-DEFINE_bool(force_mount_devkit, false, "Force devkit mount", "Storage");
+DEFINE_bool(mount_memory_unit, false, "Enable memory unit (MU) mount",
+            "Storage");
+
+DECLARE_bool(force_mount_devkit);
 
 DEFINE_transient_path(target, "",
                       "Specifies the target .xex or .iso to execute.",
@@ -293,6 +311,9 @@ std::unique_ptr<apu::AudioSystem> EmulatorApp::CreateAudioSystem(
 #if XE_PLATFORM_WIN32
   factory.Add<apu::xaudio2::XAudio2AudioSystem>("xaudio2");
 #endif  // XE_PLATFORM_WIN32
+#if XE_PLATFORM_LINUX
+  factory.Add<apu::alsa::ALSAAudioSystem>("alsa");
+#endif  // XE_PLATFORM_LINUX
 #if !XE_PLATFORM_ANDROID
   factory.Add<apu::sdl::SDLAudioSystem>("sdl");
 #endif  // !XE_PLATFORM_ANDROID
@@ -641,6 +662,21 @@ void EmulatorApp::EmulatorThread() {
 
     fs->RegisterSymbolicLink("DEVKIT:", "\\DEVKIT");
     fs->RegisterSymbolicLink("e:", "\\DEVKIT");
+  }
+
+  if (cvars::mount_memory_unit) {
+    auto mu_device =
+        std::make_unique<xe::vfs::HostPathDevice>("\\MU", "MU", false);
+
+    if (!mu_device->Initialize()) {
+      XELOGE("Unable to scan MU path");
+    }
+
+    if (!fs->RegisterDevice(std::move(mu_device))) {
+      XELOGE("Unable to register MU path");
+    }
+
+    fs->RegisterSymbolicLink("MU:", "\\MU");
   }
 
   // Set a debug handler.

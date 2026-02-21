@@ -69,6 +69,14 @@ class TextureCache {
 
   // Returns whether the actual scale is not smaller than the requested one.
   static bool GetConfigDrawResolutionScale(uint32_t& x_out, uint32_t& y_out);
+
+  // Clamps the resolution scale based on device capabilities.
+  // sparse_bind_supported: whether the device supports sparse/tiled resources
+  // virtual_address_bits: max bits for virtual address per resource (0 = no
+  // limit) Returns true if scale was not clamped.
+  static bool ClampDrawResolutionScaleToMaxSupported(
+      uint32_t& scale_x, uint32_t& scale_y, bool sparse_bind_supported,
+      uint32_t virtual_address_bits_per_resource = 0);
   uint32_t draw_resolution_scale_x() const { return draw_resolution_scale_x_; }
   uint32_t draw_resolution_scale_y() const { return draw_resolution_scale_y_; }
 
@@ -135,8 +143,13 @@ class TextureCache {
     if (!binding) {
       return false;
     }
-    return (binding->texture && binding->texture->IsResolved()) ||
-           (binding->texture_signed && binding->texture_signed->IsResolved());
+    // Check if the texture is a resolution-scaled resolve target, not just
+    // any resolved texture. Only scaled textures need coordinate adjustment.
+    // Must check the texture's key, not binding->key, because scaled_resolve
+    // is set in FindOrCreateTexture which takes the key by value.
+    return (binding->texture && binding->texture->key().scaled_resolve) ||
+           (binding->texture_signed &&
+            binding->texture_signed->key().scaled_resolve);
   }
   template <swcache::PrefetchTag tag>
   void PrefetchTextureBinding(uint32_t fetch_constant_index) const {
@@ -403,8 +416,7 @@ class TextureCache {
     uint32_t is_tiled_3d_endian_scale;
     // Base offset in bytes, resolution-scaled.
     uint32_t guest_offset;
-    // For tiled textures - row pitch in blocks, aligned to 32, unscaled.
-    // For linear textures - row pitch in bytes.
+    // Unscaled.
     uint32_t guest_pitch_aligned;
     // For 3D textures only (ignored otherwise) - aligned to 32, unscaled.
     uint32_t guest_z_stride_block_rows_aligned;

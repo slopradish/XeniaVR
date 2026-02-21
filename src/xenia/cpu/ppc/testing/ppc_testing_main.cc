@@ -21,18 +21,28 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/raw_module.h"
 
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <unordered_set>
+
 #if XE_ARCH_AMD64
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #endif  // XE_ARCH
 
 #if XE_COMPILER_MSVC
 #include "xenia/base/platform_win.h"
+#else
+#include <sys/wait.h>
+#include <unistd.h>
 #endif  // XE_COMPILER_MSVC
 
 DEFINE_path(test_path, "src/xenia/cpu/ppc/testing/",
             "Directory scanned for test files.", "Other");
 DEFINE_path(test_bin_path, "src/xenia/cpu/ppc/testing/bin/",
             "Directory with binary outputs of the test files.", "Other");
+DEFINE_path(test_skip_file, "src/xenia/cpu/ppc/testing/skip.txt",
+            "File containing test case names to skip (one per line).", "Other");
 DEFINE_transient_string(test_name, "", "Test suite name.", "General");
 
 namespace xe {
@@ -45,6 +55,39 @@ using namespace xe::literals;
 typedef std::vector<std::pair<std::string, std::string>> AnnotationList;
 
 constexpr uint32_t START_ADDRESS = 0x80000000;
+
+// Load skip list from file
+std::unordered_set<std::string> LoadSkipList(
+    const std::filesystem::path& skip_file_path) {
+  std::unordered_set<std::string> skip_list;
+
+  FILE* f = filesystem::OpenFile(skip_file_path, "r");
+  if (!f) {
+    // Skip file doesn't exist or can't be opened - that's okay
+    return skip_list;
+  }
+
+  char line_buffer[BUFSIZ];
+  while (fgets(line_buffer, sizeof(line_buffer), f)) {
+    // Remove trailing whitespace/newline
+    char* end = line_buffer + strlen(line_buffer) - 1;
+    while (end >= line_buffer &&
+           (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t')) {
+      *end = '\0';
+      --end;
+    }
+
+    // Skip empty lines and comments
+    if (strlen(line_buffer) == 0 || line_buffer[0] == '#') {
+      continue;
+    }
+
+    skip_list.insert(std::string(line_buffer));
+  }
+
+  fclose(f);
+  return skip_list;
+}
 
 struct TestCase {
   TestCase(uint32_t address, std::string& name)
@@ -191,6 +234,10 @@ class TestRunner {
   }
 
   bool Setup(TestSuite& suite) {
+    // Reset thread state first so it can properly deinitialize with the
+    // existing processor before we destroy the processor.
+    thread_state_.reset();
+
     // Reset memory.
     memory_->Reset();
 
@@ -245,14 +292,31 @@ class TestRunner {
   bool Run(TestCase& test_case) {
     // Setup test state from annotations.
     if (!SetupTestState(test_case)) {
-      XELOGE("Test setup failed");
+      fprintf(stderr, "    [%s] Test setup failed\n", test_case.name.c_str());
+      fflush(stderr);
       return false;
     }
+
+#if XE_ARCH_AMD64
+    // Reset MXCSR and backend flags to default FPU state before each test.
+    // Without this, a previous test using VMX mode may leave FTZ/DAZ set,
+    // causing subsequent scalar FPU tests to incorrectly flush denormals.
+    _mm_setcsr(xe::cpu::backend::x64::DEFAULT_FPU_MXCSR);
+    {
+      auto* x64_backend = static_cast<xe::cpu::backend::x64::X64Backend*>(
+          processor_->backend());
+      auto* bctx =
+          x64_backend->BackendContextForGuestContext(thread_state_->context());
+      bctx->flags &= ~(1U << xe::cpu::backend::x64::kX64BackendMXCSRModeBit);
+    }
+#endif
 
     // Execute test.
     auto fn = processor_->ResolveFunction(test_case.address);
     if (!fn) {
-      XELOGE("Entry function not found");
+      fprintf(stderr, "    [%s] Entry function not found\n",
+              test_case.name.c_str());
+      fflush(stderr);
       return false;
     }
 
@@ -316,9 +380,13 @@ class TestRunner {
         if (!ppc_context->CompareRegWithString(
                 reg_name.c_str(), reg_value.c_str(), actual_value)) {
           any_failed = true;
-          XELOGE("Register {} assert failed:\n", reg_name);
-          XELOGE("  Expected: {} == {}\n", reg_name, reg_value);
-          XELOGE("    Actual: {} == {}\n", reg_name, actual_value);
+          fprintf(stderr, "    [%s] Register %s assert failed:\n",
+                  test_case.name.c_str(), reg_name.c_str());
+          fprintf(stderr, "      Expected: %s == %s\n", reg_name.c_str(),
+                  reg_value.c_str());
+          fprintf(stderr, "        Actual: %s == %s\n", reg_name.c_str(),
+                  actual_value.c_str());
+          fflush(stderr);
         }
       } else if (it.first == "MEMORY_OUT") {
         size_t space_pos = it.second.find(" ");
@@ -355,9 +423,11 @@ class TestRunner {
           ++p;
         }
         if (failed) {
-          XELOGE("Memory {} assert failed:\n", address_str);
-          XELOGE("  Expected:{}\n", expecteds.to_string());
-          XELOGE("    Actual:{}\n", actuals.to_string());
+          fprintf(stderr, "    [%s] Memory %s assert failed:\n",
+                  test_case.name.c_str(), address_str.c_str());
+          fprintf(stderr, "      Expected:%s\n", expecteds.to_string().c_str());
+          fprintf(stderr, "        Actual:%s\n", actuals.to_string().c_str());
+          fflush(stderr);
         }
       }
     }
@@ -375,7 +445,11 @@ bool DiscoverTests(const std::filesystem::path& test_path,
   auto file_infos = xe::filesystem::ListFiles(test_path);
   for (auto& file_info : file_infos) {
     if (file_info.name.extension() == ".s") {
-      test_files.push_back(test_path / file_info.name);
+      // Only include test files (instr_*.s), not helper files
+      auto filename = file_info.name.filename().string();
+      if (filename.find("instr_") == 0) {
+        test_files.push_back(test_path / file_info.name);
+      }
     }
   }
   return true;
@@ -390,27 +464,140 @@ int filter(unsigned int code) {
 }
 #endif  // XE_COMPILER_MSVC
 
+#if !XE_COMPILER_MSVC
+// Run test in isolated child process to catch crashes
+enum class TestResult {
+  kPassed,
+  kFailed,
+  kCrashed,
+};
+
+TestResult RunTestInChildProcess(TestSuite& test_suite, TestCase& test_case) {
+  pid_t pid = fork();
+
+  if (pid == -1) {
+    // Fork failed
+    fprintf(stderr, "  [%s] TEST FAILED (fork failed)\n",
+            test_case.name.c_str());
+    fflush(stderr);
+    return TestResult::kFailed;
+  }
+
+  if (pid == 0) {
+    // Child process - create a fresh TestRunner to avoid inherited state issues
+    // Use a scope block to ensure destructors run before _exit(),
+    // otherwise shared memory objects in /dev/shm are never cleaned up.
+    int exit_code;
+    {
+      TestRunner child_runner;
+      if (!child_runner.Setup(test_suite)) {
+        exit_code = 2;  // Setup failure
+      } else if (child_runner.Run(test_case)) {
+        exit_code = 0;  // Test passed
+      } else {
+        exit_code = 1;  // Test failed
+      }
+    }  // child_runner destructor runs here, cleaning up shm
+    _exit(exit_code);
+  }
+
+  // Parent process - wait for child
+  int status;
+  pid_t result = waitpid(pid, &status, 0);
+
+  if (result == -1) {
+    fprintf(stderr, "  [%s] TEST FAILED (waitpid failed, pid %d)\n",
+            test_case.name.c_str(), pid);
+    fflush(stderr);
+    return TestResult::kFailed;
+  }
+
+  if (WIFEXITED(status)) {
+    int exit_code = WEXITSTATUS(status);
+    if (exit_code == 0) {
+      // Test passed - don't print anything
+      return TestResult::kPassed;
+    } else if (exit_code == 2) {
+      fprintf(stderr, "  [%s] FAILED SETUP (exit code %d)\n",
+              test_case.name.c_str(), exit_code);
+      fflush(stderr);
+      return TestResult::kFailed;
+    } else {
+      fprintf(stderr, "  [%s] FAILED (exit code %d)\n", test_case.name.c_str(),
+              exit_code);
+      fflush(stderr);
+      return TestResult::kFailed;
+    }
+  }
+
+  if (WIFSIGNALED(status)) {
+    int signal = WTERMSIG(status);
+    const char* signal_name = "UNKNOWN";
+    switch (signal) {
+      case SIGSEGV:
+        signal_name = "SIGSEGV";
+        break;
+      case SIGILL:
+        signal_name = "SIGILL";
+        break;
+      case SIGFPE:
+        signal_name = "SIGFPE";
+        break;
+      case SIGBUS:
+        signal_name = "SIGBUS";
+        break;
+      case SIGABRT:
+        signal_name = "SIGABRT";
+        break;
+    }
+    fprintf(stderr, "  [%s] CRASHED (%s)\n", test_case.name.c_str(),
+            signal_name);
+    fflush(stderr);
+    return TestResult::kCrashed;
+  }
+
+  fprintf(stderr, "  [%s] FAILED (unknown reason)\n", test_case.name.c_str());
+  fflush(stderr);
+  return TestResult::kFailed;
+}
+#endif  // !XE_COMPILER_MSVC
+
 void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
                       TestCase& test_case, int& failed_count,
                       int& passed_count) {
 #if XE_COMPILER_MSVC
   __try {
-#endif  // XE_COMPILER_MSVC
-
     if (!runner.Setup(test_suite)) {
-      XELOGE("    TEST FAILED SETUP");
+      fprintf(stderr, "  [%s] FAILED SETUP\n", test_case.name.c_str());
+      fflush(stderr);
       ++failed_count;
+      return;
     }
     if (runner.Run(test_case)) {
       ++passed_count;
+      // Print progress dot
+      fprintf(stdout, ".");
+      fflush(stdout);
     } else {
-      XELOGE("    TEST FAILED");
+      fprintf(stderr, "  [%s] FAILED\n", test_case.name.c_str());
+      fflush(stderr);
       ++failed_count;
     }
-
-#if XE_COMPILER_MSVC
   } __except (filter(GetExceptionCode())) {
-    XELOGE("    TEST FAILED (UNSUPPORTED INSTRUCTION)");
+    fprintf(stderr, "  [%s] FAILED (UNSUPPORTED INSTRUCTION)\n",
+            test_case.name.c_str());
+    fflush(stderr);
+    ++failed_count;
+  }
+#else
+  // Use fork to isolate crashes on POSIX systems
+  // Note: runner parameter is not used on POSIX
+  (void)runner;  // Suppress unused parameter warning
+  TestResult result = RunTestInChildProcess(test_suite, test_case);
+
+  if (result == TestResult::kPassed) {
+    ++passed_count;
+  } else {
     ++failed_count;
   }
 #endif  // XE_COMPILER_MSVC
@@ -424,6 +611,12 @@ bool RunTests(const std::string_view test_name) {
 #if XE_ARCH_AMD64
   XELOGI("Instruction feature mask {}.", cvars::x64_extension_mask);
 #endif  // XE_ARCH_AMD64
+
+  // Load skip list
+  auto skip_list = LoadSkipList(cvars::test_skip_file);
+  if (!skip_list.empty()) {
+    XELOGI("Loaded skip list with {} test cases to skip.", skip_list.size());
+  }
 
   auto test_path_root = cvars::test_path;
   std::vector<std::filesystem::path> test_files;
@@ -456,23 +649,42 @@ bool RunTests(const std::string_view test_name) {
   }
 
   XELOGI("{} tests loaded.", test_suites.size());
-  TestRunner runner;
+
+  // Collect all test cases across all suites, filtering out skipped tests
+  std::vector<std::pair<TestSuite*, TestCase*>> all_tests;
+  int skipped_count = 0;
   for (auto& test_suite : test_suites) {
-    XELOGI("{}.s:", test_suite.name());
-
     for (auto& test_case : test_suite.test_cases()) {
-      XELOGI("  - {}", test_case.name);
-      ProtectedRunTest(test_suite, runner, test_case, failed_count,
-                       passed_count);
+      if (skip_list.find(test_case.name) != skip_list.end()) {
+        ++skipped_count;
+        continue;  // Skip this test
+      }
+      all_tests.push_back({&test_suite, &test_case});
     }
-
-    XELOGI("");
   }
 
-  XELOGI("");
-  XELOGI("Total tests: {}", failed_count + passed_count);
-  XELOGI("Passed: {}", passed_count);
-  XELOGI("Failed: {}", failed_count);
+  if (skipped_count > 0) {
+    XELOGI("{} test cases skipped based on skip list.", skipped_count);
+  }
+
+#if XE_COMPILER_MSVC
+  // On Windows, use a single shared test runner
+  TestRunner runner;
+#else
+  // On POSIX, each test will create its own runner in a forked process
+  // Pass a dummy value that won't be used
+  TestRunner* runner_ptr = nullptr;
+  TestRunner& runner = *runner_ptr;  // Never dereferenced on POSIX
+#endif
+  for (auto& [suite, tcase] : all_tests) {
+    ProtectedRunTest(*suite, runner, *tcase, failed_count, passed_count);
+  }
+
+  fprintf(stderr, "\n");
+  fprintf(stderr, "Total tests: %d\n", failed_count + passed_count);
+  fprintf(stderr, "Passed: %d\n", passed_count);
+  fprintf(stderr, "Failed: %d\n", failed_count);
+  fflush(stderr);
 
   return failed_count ? false : true;
 }

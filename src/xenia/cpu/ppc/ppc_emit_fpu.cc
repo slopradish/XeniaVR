@@ -37,52 +37,64 @@ using xe::cpu::hir::Value;
 
 int InstrEmit_faddx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) + (frB)
-  Value* v = f.Add(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Add(fra, frb);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frb);
   return 0;
 }
 
 int InstrEmit_faddsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) + (frB)
-  Value* v = f.Add(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Add(fra, frb);
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frb);
   return 0;
 }
 
 int InstrEmit_fdivx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- frA / frB
-  Value* v = f.Div(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Div(fra, frb);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frb);
   return 0;
 }
 
 int InstrEmit_fdivsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- frA / frB
-  Value* v = f.Div(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Div(fra, frb);
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frb);
   return 0;
 }
 
 int InstrEmit_fmulx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) x (frC)
-  Value* v = f.Mul(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* v = f.Mul(fra, frc);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc);
   return 0;
 }
 
 int InstrEmit_fmulsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) x (frC)
-  Value* v = f.Mul(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* v = f.Mul(fra, frc);
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc);
   return 0;
 }
 
@@ -91,36 +103,42 @@ int InstrEmit_fresx(PPCHIRBuilder& f, const InstrData& i) {
 
   // this actually does seem to require single precision, oddly
   // more research is needed
-  Value* v = f.Recip(f.Convert(f.LoadFPR(i.A.FRB), FLOAT32_TYPE));
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Recip(f.Convert(frb, FLOAT32_TYPE));
   v = f.Convert(v, FLOAT64_TYPE);  // f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, frb);
   return 0;
 }
 
 int InstrEmit_frsqrtex(PPCHIRBuilder& f, const InstrData& i) {
   // Double precision:
   // frD <- 1/sqrt(frB)
-  Value* v = f.RSqrt(f.LoadFPR(i.A.FRB));
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.RSqrt(frb);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, frb);
   return 0;
 }
 
 int InstrEmit_fsubx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) - (frB)
-  Value* v = f.Sub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Sub(fra, frb);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frb);
   return 0;
 }
 
 int InstrEmit_fsubsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- (frA) - (frB)
-  Value* v = f.Sub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Sub(fra, frb);
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frb);
   return 0;
 }
 
@@ -136,12 +154,13 @@ int InstrEmit_fselx(PPCHIRBuilder& f, const InstrData& i) {
 }
 static int InstrEmit_fsqrt(PPCHIRBuilder& f, const InstrData& i, bool single) {
   // frD <- sqrt(frB)
-  Value* v = f.Sqrt(f.LoadFPR(i.A.FRB));
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Sqrt(frb);
   if (single) {
     v = f.ToSingle(v);
   }
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, frb);
   return 0;
 }
 int InstrEmit_fsqrtx(PPCHIRBuilder& f, const InstrData& i) {
@@ -156,13 +175,15 @@ int InstrEmit_fsqrtsx(PPCHIRBuilder& f, const InstrData& i) {
 
 static int InstrEmit_fmadd(PPCHIRBuilder& f, const InstrData& i, bool single) {
   // frD <- (frA x frC) + frB
-  Value* v =
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.MulAdd(fra, frc, frb);
   if (single) {
     v = f.ToSingle(v);
   }
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc, frb);
   return 0;
 }
 
@@ -176,13 +197,15 @@ int InstrEmit_fmaddsx(PPCHIRBuilder& f, const InstrData& i) {
 
 static int InstrEmit_fmsub(PPCHIRBuilder& f, const InstrData& i, bool single) {
   // frD <- (frA x frC) - frB
-  Value* v =
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.MulSub(fra, frc, frb);
   if (single) {
     v = f.ToSingle(v);
   }
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc, frb);
   return 0;
 }
 int InstrEmit_fmsubx(PPCHIRBuilder& f, const InstrData& i) {
@@ -195,39 +218,47 @@ int InstrEmit_fmsubsx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fnmaddx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] + frB)
-  Value* v = f.Neg(
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Neg(f.MulAdd(fra, frc, frb));
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc, frb);
   return 0;
 }
 
 int InstrEmit_fnmaddsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] + frB)
-  Value* v = f.Neg(
-      f.MulAdd(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Neg(f.MulAdd(fra, frc, frb));
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc, frb);
   return 0;
 }
 
 int InstrEmit_fnmsubx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] - frB)
-  Value* v = f.Neg(
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Neg(f.MulSub(fra, frc, frb));
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc, frb);
   return 0;
 }
 
 int InstrEmit_fnmsubsx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- -([frA x frC] - frB)
-  Value* v = f.Neg(
-      f.MulSub(f.LoadFPR(i.A.FRA), f.LoadFPR(i.A.FRC), f.LoadFPR(i.A.FRB)));
+  Value* fra = f.LoadFPR(i.A.FRA);
+  Value* frc = f.LoadFPR(i.A.FRC);
+  Value* frb = f.LoadFPR(i.A.FRB);
+  Value* v = f.Neg(f.MulSub(fra, frc, frb));
   v = f.ToSingle(v);
   f.StoreFPR(i.A.FRT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.A.Rc, fra, frc, frb);
   return 0;
 }
 
@@ -235,19 +266,23 @@ int InstrEmit_fnmsubsx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fcfidx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- signed_int64_to_double( frB )
+  // Input is an integer bit pattern in FPR, not a float - no NaN detection.
   Value* v = f.Convert(f.Cast(f.LoadFPR(i.X.RB), INT64_TYPE), FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
-  f.UpdateFPSCR(v, i.A.Rc);
+  f.UpdateFPSCR(v, i.X.Rc);
   return 0;
 }
 
 int InstrEmit_fctidxx_(PPCHIRBuilder& f, const InstrData& i,
                        RoundMode round_mode) {
+  // Result is an integer bit pattern in FPR, not a float - no NaN detection.
+  // NaN input is already handled explicitly by the branch.
   auto end = f.NewLabel();
   auto isnan = f.NewLabel();
   Value* v;
-  f.BranchTrue(f.IsNan(f.LoadFPR(i.X.RB)), isnan);
-  v = f.Convert(f.LoadFPR(i.X.RB), INT64_TYPE, round_mode);
+  Value* frb = f.LoadFPR(i.X.RB);
+  f.BranchTrue(f.IsNan(frb), isnan);
+  v = f.Convert(frb, INT64_TYPE, round_mode);
   v = f.Cast(v, FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
   f.UpdateFPSCR(v, i.X.Rc);
@@ -271,11 +306,14 @@ int InstrEmit_fctidzx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_fctiwxx_(PPCHIRBuilder& f, const InstrData& i,
                        RoundMode round_mode) {
+  // Result is an integer bit pattern in FPR, not a float - no NaN detection.
+  // NaN input is already handled explicitly by the branch.
   auto end = f.NewLabel();
   auto isnan = f.NewLabel();
   Value* v;
-  f.BranchTrue(f.IsNan(f.LoadFPR(i.X.RB)), isnan);
-  v = f.Convert(f.LoadFPR(i.X.RB), INT32_TYPE, round_mode);
+  Value* frb = f.LoadFPR(i.X.RB);
+  f.BranchTrue(f.IsNan(frb), isnan);
+  v = f.Convert(frb, INT32_TYPE, round_mode);
   v = f.Cast(f.SignExtend(v, INT64_TYPE), FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
   f.UpdateFPSCR(v, i.X.Rc);
@@ -300,10 +338,11 @@ int InstrEmit_fctiwzx(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_frspx(PPCHIRBuilder& f, const InstrData& i) {
   // frD <- Round_single(frB)
-  Value* v = f.Convert(f.LoadFPR(i.X.RB), FLOAT32_TYPE, ROUND_DYNAMIC);
+  Value* frb = f.LoadFPR(i.X.RB);
+  Value* v = f.Convert(frb, FLOAT32_TYPE, ROUND_DYNAMIC);
   v = f.Convert(v, FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
-  f.UpdateFPSCR(v, i.X.Rc);
+  f.UpdateFPSCR(v, i.X.Rc, frb);
   return 0;
 }
 
@@ -352,17 +391,37 @@ int InstrEmit_fcmpu(PPCHIRBuilder& f, const InstrData& i) {
 // Floating-point status and control register (A
 
 int InstrEmit_mcrfs(PPCHIRBuilder& f, const InstrData& i) {
-  XEINSTRNOTIMPLEMENTED();
-  return 1;
+  // mcrfs CRFD, CRFS
+  // CR[4*CRFD:4*CRFD+3] <- FPSCR[4*CRFS:4*CRFS+3]
+  // FPSCR[4*CRFS:4*CRFS+3] <- 0 (exception bits cleared)
+
+  uint32_t crfd = i.X.RT >> 2;  // Destination CR field
+  uint32_t crfs = i.X.RA >> 2;  // Source FPSCR field
+
+  Value* fpscr = f.LoadFPSCR();
+
+  // Extract 4-bit field from FPSCR
+  // FPSCR fields are numbered from left to right (0-7), with field 0 being bits
+  // 0-3
+  uint32_t shift = 4 * (7 - crfs);
+  Value* fpscr_field = f.And(f.Shr(fpscr, shift), f.LoadConstantUint32(0xF));
+
+  // Store to CR field (need to shift to proper position in 64-bit CR)
+  f.StoreCR(crfd, f.Shl(f.ZeroExtend(fpscr_field, INT64_TYPE), 4 * (7 - crfd)));
+
+  // Clear the FPSCR field (set to 0)
+  uint32_t mask = ~(0xF << shift);
+  f.StoreFPSCR(f.And(fpscr, f.LoadConstantUint32(mask)));
+
+  return 0;
 }
 
 int InstrEmit_mffsx(PPCHIRBuilder& f, const InstrData& i) {
-  if (i.X.Rc) {
-    XEINSTRNOTIMPLEMENTED();
-    return 1;
-  }
   Value* v = f.Cast(f.ZeroExtend(f.LoadFPSCR(), INT64_TYPE), FLOAT64_TYPE);
   f.StoreFPR(i.X.RT, v);
+  if (i.X.Rc) {
+    f.CopyFPSCRToCR1();
+  }
   return 0;
 }
 

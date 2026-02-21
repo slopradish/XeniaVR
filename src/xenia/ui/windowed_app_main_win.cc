@@ -124,7 +124,7 @@ void HostExceptionReport::AddString(const char* s) {
 }
 
 const char* HostExceptionReport::GetFormattedAddress(uintptr_t address) {
-  char(&current_buffer)[128] =
+  char (&current_buffer)[128] =
       formatted_addresses[address_format_ring_index++ % 16];
 
   /* if (address >= g_xenia_exe_base &&
@@ -191,7 +191,7 @@ static bool exception_pointers_handler(HostExceptionReport* report) {
           xe::kernel::kernel_state()->emulator()->title_version();
 
       title_info =
-          fmt::format("{}({:08X}) - {}", title_name, title_id, title_version);
+          fmt::format("{} ({:08X}) - {}", title_name, title_id, title_version);
     }
   }
 

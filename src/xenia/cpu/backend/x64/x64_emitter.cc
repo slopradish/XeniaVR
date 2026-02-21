@@ -231,7 +231,13 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
     locals_page_delta_ = 0;
   }
 
-  assert_true((stack_size + 8) % 16 == 0);
+  // Ensure that after we SUB the stack_size, RSP is 16-byte aligned.
+  // On function entry, RSP is misaligned by 8 (due to CALL pushing return
+  // address). So we need stack_size to be 8 mod 16, not 0 mod 16.
+  if ((stack_size % 16) == 0) {
+    stack_size += 8;  // Make it 8 mod 16
+  }
+  assert_true((stack_size % 16) == 8);  // Should be 8 mod 16 for alignment
   func_info.stack_size = stack_size;
   stack_size_ = stack_size;
 
@@ -1152,8 +1158,8 @@ static const vec128_t xmm_consts[] = {
         */
     vec128q(0x7fe000007fe000ULL),
 
-    /* XMMF16PackLCPI0*/
-    vec128i(0x8000000),
+    /* XMMF16PackLCPI0 (bias + round-half-down) */
+    vec128i(0x8000FFF),
     /*XMMF16PackLCPI2*/
     vec128i(0x47ffe000),
     /*XMMF16PackLCPI3*/

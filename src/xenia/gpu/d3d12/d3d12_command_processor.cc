@@ -9,12 +9,14 @@
 
 #include "xenia/gpu/d3d12/d3d12_command_processor.h"
 #include <cstring>
+#include "xenia/apu/audio_system.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/profiling.h"
+#include "xenia/emulator.h"
 #include "xenia/gpu/d3d12/d3d12_graphics_system.h"
 #include "xenia/gpu/d3d12/d3d12_shader.h"
 #include "xenia/gpu/draw_util.h"
@@ -22,6 +24,7 @@
 #include "xenia/gpu/packet_disassembler.h"
 #include "xenia/gpu/registers.h"
 #include "xenia/gpu/xenos.h"
+#include "xenia/kernel/kernel_state.h"
 #include "xenia/ui/d3d12/d3d12_presenter.h"
 #include "xenia/ui/d3d12/d3d12_util.h"
 
@@ -468,8 +471,8 @@ bool D3D12CommandProcessor::RequestOneUseSingleViewDescriptors(
       } else {
         descriptor_index = view_bindless_heap_allocated_++;
       }
-      view_bindless_one_use_descriptors_.push_back(
-          std::make_pair(descriptor_index, submission_current_));
+      view_bindless_one_use_descriptors_.emplace_back(descriptor_index,
+                                                      GetCurrentSubmission());
       handles_out[i] =
           std::make_pair(provider.OffsetViewDescriptor(
                              view_bindless_heap_cpu_start_, descriptor_index),
@@ -652,7 +655,8 @@ ID3D12Resource* D3D12CommandProcessor::RequestScratchGPUBuffer(
     return nullptr;
   }
   if (scratch_buffer_ != nullptr) {
-    resources_for_deletion_.emplace_back(submission_current_, scratch_buffer_);
+    resources_for_deletion_.emplace_back(GetCurrentSubmission(),
+                                         scratch_buffer_);
   }
   scratch_buffer_ = buffer;
   scratch_buffer_size_ = size;
@@ -794,6 +798,10 @@ std::string D3D12CommandProcessor::GetWindowTitleText() const {
       title << ' ' << draw_resolution_scale_x << 'x' << draw_resolution_scale_y;
     }
   }
+  auto* audio_system = kernel_state_->emulator()->audio_system();
+  if (audio_system) {
+    title << " - " << audio_system->name();
+  }
   return title.str();
 }
 
@@ -807,22 +815,11 @@ bool D3D12CommandProcessor::SetupContext() {
   ID3D12Device* device = provider.GetDevice();
   ID3D12CommandQueue* direct_queue = provider.GetDirectQueue();
 
-  fence_completion_event_ = CreateEvent(nullptr, false, false, nullptr);
-  if (fence_completion_event_ == nullptr) {
-    XELOGE("Failed to create the fence completion event");
-    return false;
-  }
-  if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE,
-                                 IID_PPV_ARGS(&submission_fence_)))) {
-    XELOGE("Failed to create the submission fence");
-    return false;
-  }
-  if (FAILED(device->CreateFence(
-          0, D3D12_FENCE_FLAG_NONE,
-          IID_PPV_ARGS(&queue_operations_since_submission_fence_)))) {
-    XELOGE(
-        "Failed to create the fence for awaiting queue operations done since "
-        "the latest submission");
+  completion_timeline_ = ui::d3d12::D3D12GPUCompletionTimeline::Create(device);
+  queue_operations_since_submission_completion_timeline_ =
+      ui::d3d12::D3D12GPUCompletionTimeline::Create(device);
+  if (!completion_timeline_ ||
+      !queue_operations_since_submission_completion_timeline_) {
     return false;
   }
 
@@ -861,8 +858,11 @@ bool D3D12CommandProcessor::SetupContext() {
       TextureCache::GetConfigDrawResolutionScale(draw_resolution_scale_x,
                                                  draw_resolution_scale_y);
 
-  if (!D3D12TextureCache::ClampDrawResolutionScaleToMaxSupported(
-          draw_resolution_scale_x, draw_resolution_scale_y, provider)) {
+  bool has_tiled_resources =
+      provider.GetTiledResourcesTier() >= D3D12_TILED_RESOURCES_TIER_1;
+  if (!TextureCache::ClampDrawResolutionScaleToMaxSupported(
+          draw_resolution_scale_x, draw_resolution_scale_y, has_tiled_resources,
+          provider.GetVirtualAddressBitsPerResource())) {
     draw_resolution_scale_not_clamped = false;
   }
   if (!draw_resolution_scale_not_clamped) {
@@ -1698,21 +1698,10 @@ void D3D12CommandProcessor::ShutdownContext() {
   frame_completed_ = 0;
   std::memset(closed_frame_submissions_, 0, sizeof(closed_frame_submissions_));
 
-  // First release the fences since they may reference fence_completion_event_.
+  queue_operations_since_submission_completion_timeline_.reset();
 
-  queue_operations_done_since_submission_signal_ = false;
-  queue_operations_since_submission_fence_last_ = 0;
-  ui::d3d12::util::ReleaseAndNull(queue_operations_since_submission_fence_);
-
-  ui::d3d12::util::ReleaseAndNull(submission_fence_);
   submission_open_ = false;
-  submission_current_ = 1;
-  submission_completed_ = 0;
-
-  if (fence_completion_event_) {
-    CloseHandle(fence_completion_event_);
-    fence_completion_event_ = nullptr;
-  }
+  completion_timeline_.reset();
 
   device_removed_ = false;
 
@@ -2208,7 +2197,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 fxaa_source_texture_->GetDesc();
             if (fxaa_source_texture_desc.Width != swap_texture_desc.Width ||
                 fxaa_source_texture_desc.Height != swap_texture_desc.Height) {
-              if (submission_completed_ < fxaa_source_texture_submission_) {
+              if (GetCompletedSubmission() < fxaa_source_texture_submission_) {
                 fxaa_source_texture_->AddRef();
                 resources_for_deletion_.emplace_back(
                     fxaa_source_texture_submission_,
@@ -2339,7 +2328,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr,
                 .resource_uav_capable();
 
         if (use_fxaa) {
-          fxaa_source_texture_submission_ = submission_current_;
+          fxaa_source_texture_submission_ = GetCurrentSubmission();
         }
 
         ID3D12Resource* apply_gamma_dest =
@@ -3202,8 +3191,10 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
   return true;
 }
-void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
-  if (await_submission >= submission_current_) {
+
+void D3D12CommandProcessor::CheckSubmissionCompletion(
+    uint64_t await_submission) {
+  if (await_submission >= GetCurrentSubmission()) {
     if (submission_open_) {
       EndSubmission(false);
     }
@@ -3212,47 +3203,31 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
     // submission, but just in case of a failure, or queue operations being done
     // outside of a submission, await explicitly.
     if (queue_operations_done_since_submission_signal_) {
-      UINT64 fence_value = ++queue_operations_since_submission_fence_last_;
       ID3D12CommandQueue* direct_queue = GetD3D12Provider().GetDirectQueue();
-      if (SUCCEEDED(direct_queue->Signal(
-              queue_operations_since_submission_fence_, fence_value)) &&
-          SUCCEEDED(
-              queue_operations_since_submission_fence_->SetEventOnCompletion(
-                  fence_value, fence_completion_event_))) {
-        WaitForSingleObject(fence_completion_event_, INFINITE);
+      if (SUCCEEDED(queue_operations_since_submission_completion_timeline_
+                        ->SignalAndAdvance(direct_queue)) &&
+          queue_operations_since_submission_completion_timeline_
+              ->AwaitAllSubmissions()) {
         queue_operations_done_since_submission_signal_ = false;
       } else {
         XELOGE(
-            "Failed to await an out-of-submission queue operation completion "
-            "Direct3D 12 fence");
+            "Failed to await the completion of an out-of-submission "
+            "Direct3D 12 queue operation");
       }
     }
     // A submission won't be ended if it hasn't been started, or if ending
     // has failed - clamp the index.
-    await_submission = submission_current_ - 1;
+    await_submission = GetCurrentSubmission() - 1;
   }
 
-  uint64_t submission_completed_before = submission_completed_;
-  submission_completed_ = submission_fence_->GetCompletedValue();
-  if (submission_completed_ < await_submission) {
-    if (SUCCEEDED(submission_fence_->SetEventOnCompletion(
-            await_submission, fence_completion_event_))) {
-      WaitForSingleObject(fence_completion_event_, INFINITE);
-      submission_completed_ = submission_fence_->GetCompletedValue();
-    }
-  }
-  if (submission_completed_ < await_submission) {
-    XELOGE("Failed to await a submission completion Direct3D 12 fence");
-  }
-  if (submission_completed_ <= submission_completed_before) {
-    // Not updated - no need to reclaim or download things.
-    return;
-  }
+  completion_timeline_->AwaitSubmissionAndUpdateCompleted(await_submission);
+
+  const uint64_t completed_submission = GetCompletedSubmission();
 
   // Reclaim command allocators.
   while (command_allocator_submitted_first_) {
     if (command_allocator_submitted_first_->last_usage_submission >
-        submission_completed_) {
+        completed_submission) {
       break;
     }
     if (command_allocator_writable_last_) {
@@ -3273,7 +3248,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
   // Release single-use bindless descriptors.
   while (!view_bindless_one_use_descriptors_.empty()) {
     if (view_bindless_one_use_descriptors_.front().second >
-        submission_completed_) {
+        completed_submission) {
       break;
     }
     ReleaseViewBindlessDescriptorImmediately(
@@ -3283,7 +3258,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
 
   // Delete transient resources marked for deletion.
   while (!resources_for_deletion_.empty()) {
-    if (resources_for_deletion_.front().first > submission_completed_) {
+    if (resources_for_deletion_.front().first > completed_submission) {
       break;
     }
     resources_for_deletion_.front().second->Release();
@@ -3296,7 +3271,7 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
 
   primitive_processor_->CompletedSubmissionUpdated();
 
-  texture_cache_->CompletedSubmissionUpdated(submission_completed_);
+  texture_cache_->CompletedSubmissionUpdated(completed_submission);
 }
 
 bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
@@ -3326,7 +3301,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
   // Check the fence - needed for all kinds of submissions (to reclaim transient
   // resources early) and specifically for frames (not to queue too many), and
   // await the availability of the current frame.
-  CheckSubmissionFence(
+  CheckSubmissionCompletion(
       is_opening_frame
           ? closed_frame_submissions_[frame_current_ % kQueueFrames]
           : 0);
@@ -3342,7 +3317,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
     for (uint64_t frame = frame_completed_ + 1; frame < frame_current_;
          ++frame) {
       if (closed_frame_submissions_[frame % kQueueFrames] >
-          submission_completed_) {
+          GetCompletedSubmission()) {
         break;
       }
       frame_completed_ = frame;
@@ -3379,7 +3354,7 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
 
     primitive_processor_->BeginSubmission();
 
-    texture_cache_->BeginSubmission(submission_current_);
+    texture_cache_->BeginSubmission(GetCurrentSubmission());
   }
 
   if (is_opening_frame) {
@@ -3502,6 +3477,8 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     // destroyed between frames.
     SubmitBarriers();
 
+    // TODO(Triang3l): Error checking.
+
     ID3D12CommandQueue* direct_queue = provider.GetDirectQueue();
 
     // Submit the deferred command list.
@@ -3518,7 +3495,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     ID3D12CommandList* execute_command_lists[] = {command_list_};
     direct_queue->ExecuteCommandLists(1, execute_command_lists);
     command_allocator_writable_first_->last_usage_submission =
-        submission_current_;
+        GetCurrentSubmission();
     if (command_allocator_submitted_last_) {
       command_allocator_submitted_last_->next =
           command_allocator_writable_first_;
@@ -3531,8 +3508,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     if (!command_allocator_writable_first_) {
       command_allocator_writable_last_ = nullptr;
     }
-
-    direct_queue->Signal(submission_fence_, submission_current_++);
+    completion_timeline_->SignalAndAdvance(direct_queue);
 
     submission_open_ = false;
 
@@ -3556,7 +3532,7 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
     frame_open_ = false;
     // Submission already closed now, so minus 1.
     closed_frame_submissions_[(frame_current_++) % kQueueFrames] =
-        submission_current_ - 1;
+        GetCurrentSubmission() - 1;
 
     if (cache_clear_requested_ && AwaitAllQueueOperationsCompletion()) {
       cache_clear_requested_ = false;
@@ -4646,7 +4622,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
           ID3D12DescriptorHeap* sampler_heap_new;
           if (!sampler_bindless_heaps_overflowed_.empty() &&
               sampler_bindless_heaps_overflowed_.front().second <=
-                  submission_completed_) {
+                  GetCompletedSubmission()) {
             sampler_heap_new = sampler_bindless_heaps_overflowed_.front().first;
             sampler_bindless_heaps_overflowed_.pop_front();
           } else {
@@ -4668,7 +4644,7 @@ bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
           // leave the values in an undefined state in case CreateDescriptorHeap
           // has failed.
           sampler_bindless_heaps_overflowed_.push_back(std::make_pair(
-              sampler_bindless_heap_current_, submission_current_));
+              sampler_bindless_heap_current_, GetCurrentSubmission()));
           sampler_bindless_heap_current_ = sampler_heap_new;
           sampler_bindless_heap_cpu_start_ =
               sampler_bindless_heap_current_

@@ -121,6 +121,7 @@ bool XmaContextNew::Work() {
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
+  const XMA_CONTEXT_DATA initial_data = data;
 
   if (!data.output_buffer_valid) {
     return true;
@@ -130,15 +131,17 @@ bool XmaContextNew::Work() {
 
   if (data.IsConsumeOnlyContext()) {
     Consume(&output_rb, &data);
-    if (data.output_buffer_read_offset == data.output_buffer_write_offset) {
-      Clear();
+    if (!data.HasTightOutputBuffer() &&
+        data.output_buffer_read_offset == data.output_buffer_write_offset) {
+      ClearLocked(&data);
     }
-    data.Store(context_ptr);
+    StoreContextMerged(data, initial_data, context_ptr);
     return true;
   }
 
   const int32_t minimum_subframe_decode_count =
-      (data.subframe_decode_count * 2) - 1;
+      ((kBytesPerFrameChannel / kOutputBytesPerBlock) << data.is_stereo) +
+      data.output_buffer_padding;
 
   // We don't have enough space to even make one pass
   // Waiting for decoder to return more space.
@@ -147,7 +150,7 @@ bool XmaContextNew::Work() {
     XELOGD("XmaContext {}: No space for subframe decoding {}/{}!", id(),
            minimum_subframe_decode_count,
            remaining_subframe_blocks_in_output_buffer_);
-    data.Store(context_ptr);
+    StoreContextMerged(data, initial_data, context_ptr);
     return true;
   }
 
@@ -155,12 +158,12 @@ bool XmaContextNew::Work() {
          minimum_subframe_decode_count) {
     XELOGAPU(
         "XmaContext {}: Write Count: {}, Capacity: {} - {} {} Subframes: {} "
-        "Skip: {}",
+        "Padding: {}",
         id(), (uint32_t)output_rb.write_count(),
         remaining_subframe_blocks_in_output_buffer_,
         data.input_buffer_0_valid + (data.input_buffer_1_valid << 1),
         data.output_buffer_valid, data.subframe_decode_count,
-        data.subframe_skip_count);
+        data.output_buffer_padding);
 
     Decode(&data);
     Consume(&output_rb, &data);
@@ -183,26 +186,11 @@ bool XmaContextNew::Work() {
     data.output_buffer_valid = 0;
   }
 
-  // TODO: Rewrite!
-  // There is a case when game can modify certain parts of context mid-play
-  // and decoder should be aware of it
-  data.Store(context_ptr);
+  StoreContextMerged(data, initial_data, context_ptr);
   return true;
 }
 
-void XmaContextNew::Enable() {
-  std::lock_guard<xe_mutex> lock(lock_);
-
-  auto context_ptr = memory()->TranslateVirtual(guest_ptr());
-  XMA_CONTEXT_DATA data(context_ptr);
-
-  XELOGAPU("XmaContext: kicking context {} (buffer {} {}/{} bits)", id(),
-           data.current_buffer, data.input_buffer_read_offset,
-           data.GetCurrentInputBufferPacketCount() * kBitsPerPacket);
-
-  data.Store(context_ptr);
-  set_is_enabled(true);
-}
+void XmaContextNew::Enable() { set_is_enabled(true); }
 
 bool XmaContextNew::Block(bool poll) {
   if (!lock_.try_lock()) {
@@ -217,34 +205,33 @@ bool XmaContextNew::Block(bool poll) {
 
 void XmaContextNew::Clear() {
   std::lock_guard<xe_mutex> lock(lock_);
-  XELOGAPU("XmaContext: reset context {}", id());
 
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
   XMA_CONTEXT_DATA data(context_ptr);
-
-  data.input_buffer_0_valid = 0;
-  data.input_buffer_1_valid = 0;
-  data.output_buffer_valid = 0;
-
-  data.input_buffer_read_offset = 0;
-  data.output_buffer_read_offset = 0;
-  data.output_buffer_write_offset = 0;
-  data.input_buffer_read_offset = kBitsPerPacketHeader;
-
-  current_frame_remaining_subframes_ = 0;
+  ClearLocked(&data);
   data.Store(context_ptr);
 }
 
-void XmaContextNew::Disable() {
-  std::lock_guard<xe_mutex> lock(lock_);
-  XELOGAPU("XmaContext: disabling context {}", id());
-  set_is_enabled(false);
+void XmaContextNew::ClearLocked(XMA_CONTEXT_DATA* data) {
+  XELOGAPU("XmaContext: reset context {}", id());
+
+  data->input_buffer_0_valid = 0;
+  data->input_buffer_1_valid = 0;
+  data->output_buffer_valid = 0;
+
+  data->input_buffer_read_offset = kBitsPerPacketHeader;
+  data->output_buffer_read_offset = 0;
+  data->output_buffer_write_offset = 0;
+
+  current_frame_remaining_subframes_ = 0;
 }
+
+void XmaContextNew::Disable() { set_is_enabled(false); }
 
 void XmaContextNew::Release() {
   // Lock it in case the decoder thread is working on it now.
   std::lock_guard<xe_mutex> lock(lock_);
-  assert_true(is_allocated_ == true);
+  assert_true(is_allocated());
 
   set_is_allocated(false);
   auto context_ptr = memory()->TranslateVirtual(guest_ptr());
@@ -279,12 +266,19 @@ void XmaContextNew::Consume(RingBuffer* XE_RESTRICT output_rb,
   const int8_t raw_frame_read_offset =
       ((kBytesPerFrameChannel / kOutputBytesPerBlock) << data->is_stereo) -
       current_frame_remaining_subframes_;
-  // + data->subframe_skip_count;
 
   output_rb->Write(
       raw_frame_.data() + (kOutputBytesPerBlock * raw_frame_read_offset),
       subframes_to_write * kOutputBytesPerBlock);
-  remaining_subframe_blocks_in_output_buffer_ -= subframes_to_write;
+
+  // Reserve extra blocks as headroom when unk_skip_decode is set.
+  // Only apply when the frame is fully consumed to avoid double-counting.
+  const int8_t headroom =
+      (current_frame_remaining_subframes_ - subframes_to_write == 0)
+          ? data->output_buffer_padding
+          : 0;
+
+  remaining_subframe_blocks_in_output_buffer_ -= subframes_to_write + headroom;
   current_frame_remaining_subframes_ -= subframes_to_write;
 
   XELOGAPU("XmaContext {}: Consume: {} - {} - {} - {} - {}", id(),
@@ -334,6 +328,13 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
       static_cast<void*>(current_input_buffer), data->output_buffer_ptr,
       data->output_buffer_block_count);
 
+  // Games like Dirt 2 can kick the decoder with read offset 0 (pointing into
+  // the packet header) before filling in a valid offset. Clamp to the first
+  // valid data position to avoid rejecting the packet entirely.
+  if (data->input_buffer_read_offset < kBitsPerPacketHeader) {
+    data->input_buffer_read_offset = kBitsPerPacketHeader;
+  }
+
   const uint32_t current_input_size = GetCurrentInputBufferSize(data);
   const uint32_t current_input_packet_count =
       current_input_size / kBytesPerPacket;
@@ -357,9 +358,41 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
 
   const uint32_t relative_offset =
       data->input_buffer_read_offset % kBitsPerPacket;
-  const kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
+  kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
   const uint32_t packet_to_skip = xma::GetPacketSkipCount(packet) + 1;
   const uint32_t next_packet_index = packet_index + packet_to_skip;
+
+  // Frame header split across packet boundary — combine packets to read
+  // the full 15-bit header and resolve the real frame size.
+  // Only detected for XMA2 packets where the header provides an authoritative
+  // frame count. XMA1 packets lack a frame count field so split headers
+  // cannot be detected — if XMA1 encoders can produce them, those frames
+  // will still be silently lost.
+  if (packet_info.current_frame_size_ == 0) {
+    const uint8_t* next_packet =
+        GetNextPacket(data, next_packet_index, current_input_packet_count);
+    if (!next_packet) {
+      // Matching split-body error handling below; correct error code unknown.
+      data->error_status = 4;
+      return;
+    }
+    std::memcpy(input_buffer_.data(), packet + kBytesPerPacketHeader,
+                kBytesPerPacketData);
+    std::memcpy(input_buffer_.data() + kBytesPerPacketData,
+                next_packet + kBytesPerPacketHeader, kBytesPerPacketData);
+
+    BitStream combined(input_buffer_.data(),
+                       (kBitsPerPacket - kBitsPerPacketHeader) * 2);
+    combined.SetOffset(relative_offset - kBitsPerPacketHeader);
+
+    uint64_t frame_size = combined.Peek(kBitsPerFrameHeader);
+    if (frame_size == xma::kMaxFrameLength) {
+      // Matching split-body error handling below; correct error code unknown.
+      data->error_status = 4;
+      return;
+    }
+    packet_info.current_frame_size_ = (uint32_t)frame_size;
+  }
 
   BitStream stream =
       BitStream(current_input_buffer, (packet_index + 1) * kBitsPerPacket);
@@ -620,7 +653,15 @@ const kPacketInfo XmaContextNew::GetPacketInfo(uint8_t* packet,
 
   if (xma::IsPacketXma2Type(packet)) {
     const uint8_t xma2_frame_count = xma::GetPacketFrameCount(packet);
-    if (xma2_frame_count != packet_info.frame_count_) {
+    if (xma2_frame_count > packet_info.frame_count_) {
+      // Frame header split across packet boundary — scanner couldn't
+      // peek the full 15-bit header. Trust the XMA2 header count.
+      if (packet_info.current_frame_size_ == 0) {
+        // Current frame is the split-header frame
+        packet_info.current_frame_ = packet_info.frame_count_;
+      }
+      packet_info.frame_count_ = xma2_frame_count;
+    } else if (xma2_frame_count != packet_info.frame_count_) {
       XELOGE(
           "XmaContext {}: XMA2 packet header defines different amount of "
           "frames than internally found! (Header: {} Found: {})",
@@ -696,6 +737,37 @@ bool XmaContextNew::DecodePacket(AVCodecContext* av_context,
     return false;
   }
   return true;
+}
+
+void XmaContextNew::StoreContextMerged(const XMA_CONTEXT_DATA& data,
+                                       const XMA_CONTEXT_DATA& initial_data,
+                                       uint8_t* context_ptr) {
+  XMA_CONTEXT_DATA fresh(context_ptr);
+
+  // DWORD 0: decoder owns loop_count, output_buffer_write_offset.
+  // Only clear valid flags the decoder actually consumed (was 1, now 0).
+  fresh.loop_count = data.loop_count;
+  fresh.output_buffer_write_offset = data.output_buffer_write_offset;
+  if (initial_data.input_buffer_0_valid && !data.input_buffer_0_valid) {
+    fresh.input_buffer_0_valid = 0;
+  }
+  if (initial_data.input_buffer_1_valid && !data.input_buffer_1_valid) {
+    fresh.input_buffer_1_valid = 0;
+  }
+
+  // DWORD 1: decoder conditionally clears output_buffer_valid
+  if (initial_data.output_buffer_valid && !data.output_buffer_valid) {
+    fresh.output_buffer_valid = 0;
+  }
+
+  // DWORD 2: decoder owns input_buffer_read_offset, error_status
+  fresh.input_buffer_read_offset = data.input_buffer_read_offset;
+  fresh.error_status = data.error_status;
+
+  // DWORD 4: decoder owns current_buffer
+  fresh.current_buffer = data.current_buffer;
+
+  fresh.Store(context_ptr);
 }
 
 }  // namespace apu
