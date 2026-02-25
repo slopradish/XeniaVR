@@ -167,6 +167,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (with_swapchain) {
     // #2.
     XE_UI_VULKAN_STRUCT_EXTENSION(KHR_swapchain)
+#if XE_PLATFORM_WIN32
+    // #256. Windows-only extension to control fullscreen exclusive behavior.
+    // Used to prevent HDR state corruption during fullscreen transitions.
+    XE_UI_VULKAN_STRUCT_EXTENSION(EXT_full_screen_exclusive)
+#endif
   }
 
   bool ext_1_2_KHR_sampler_mirror_clamp_to_edge = false;
@@ -624,6 +629,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
     if (with_gpu_emulation) {
       XE_UI_VULKAN_FEATURE_2(features_1_2, samplerMirrorClampToEdge);
+      XE_UI_VULKAN_FEATURE_2(features_1_2, uniformBufferStandardLayout);
+      XE_UI_VULKAN_FEATURE_2(features_1_2, scalarBlockLayout);
     }
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {
