@@ -80,7 +80,8 @@
 	ignore = dirty
 [submodule "third_party/FFmpeg"]
 	path = third_party/FFmpeg
-	url = https://github.com/xenia-canary/FFmpeg_radixsplit.git
+	url = https://github.com/has207/FFmpeg.git
+	branch = xmaframes
 	ignore = dirty
 [submodule "third_party/premake-androidndk"]
 	path = third_party/premake-androidndk

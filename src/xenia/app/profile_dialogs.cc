@@ -45,7 +45,7 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
                         ImGuiWindowFlags_AlwaysAutoResize |
                         ImGuiWindowFlags_HorizontalScrollbar)) {
     ImGui::End();
-    delete this;
+    Close();
     return;
   }
 
@@ -82,7 +82,7 @@ void NoProfileDialog::OnDraw(ImGuiIO& io) {
   if (ImGui::Button("Close") || !dialog_open) {
     emulator_window_->SetHotkeysState(true);
     ImGui::End();
-    delete this;
+    Close();
     return;
   }
   ImGui::End();
@@ -189,7 +189,7 @@ void ProfileConfigDialog::OnDraw(ImGuiIO& io) {
              ImGui::GetWindowPos().y);
 
   for (auto& [xuid, account] : *profiles) {
-    ImGui::PushID(static_cast<int>(xuid));
+    ImGui::PushID(fmt::format("{:016X}", xuid).c_str());
 
     const uint8_t user_index =
         profile_manager->GetUserIndexAssignedToProfile(xuid);
