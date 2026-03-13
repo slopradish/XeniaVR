@@ -9,8 +9,13 @@
 
 #include "xenia/kernel/xthread.h"
 
+#if XE_PLATFORM_LINUX
+#include <signal.h>
+#endif
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/cpu/processor.h"
@@ -187,7 +192,7 @@ void XThread::InitializeGuestObject() {
   guest_thread->stack_base = (this->stack_base_);
   guest_thread->stack_limit = (this->stack_limit_);
   guest_thread->stack_kernel = (this->stack_base_ - 240);
-  guest_thread->tls_address = (this->tls_static_address_);
+  guest_thread->tls_address = (this->tls_dynamic_address_);
   guest_thread->thread_state = 0;
   uint32_t process_info_block_address =
       creation_params_.guest_process ? creation_params_.guest_process
@@ -512,16 +517,6 @@ X_STATUS XThread::Terminate(int exit_code) {
   return X_STATUS_SUCCESS;
 }
 
-class reenter_exception {
- public:
-  reenter_exception(uint32_t address) : address_(address) {};
-  virtual ~reenter_exception() {};
-  uint32_t address() const { return address_; }
-
- private:
-  uint32_t address_;
-};
-
 void XThread::Execute() {
   XELOGKERNEL("XThread::Execute thid {} (handle={:08X}, '{}', native={:08X})",
               thread_id_, handle(), thread_name_, thread_->system_id());
@@ -550,16 +545,31 @@ void XThread::Execute() {
     want_exit_code = true;
   }
 
+  // Set up reentry mechanism for fiber-based stack switching.
+  // When Reenter() is called (e.g., by KeSetCurrentStackPointers), it
+  // unwinds back here to re-enter at a new guest address.
+  //
+  // On Linux, C++ exceptions are used so that DWARF unwind info (registered
+  // for JIT code via __register_frame) allows proper destructor/RAII cleanup
+  // through both JIT and host C++ frames.
+  //
+  // On Windows, setjmp/longjmp is used because MSVC's longjmp performs SEH
+  // stack unwinding which already calls destructors.
   uint32_t next_address;
+#if XE_PLATFORM_LINUX
   try {
     exit_code = static_cast<int>(kernel_state()->processor()->Execute(
         thread_state_, address, args.data(), args.size()));
     next_address = 0;
-  } catch (const reenter_exception& ree) {
-    next_address = ree.address();
+  } catch (const FiberReentryException& e) {
+    // Ensure SIGRTMIN (used for thread suspend) is not left blocked.
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, SIGRTMIN);
+    pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+    next_address = e.address;
   }
 
-  // See XThread::Reenter comments.
   while (next_address != 0) {
     try {
       kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
@@ -567,10 +577,35 @@ void XThread::Execute() {
       if (want_exit_code) {
         exit_code = static_cast<int>(thread_state_->context()->r[3]);
       }
-    } catch (const reenter_exception& ree) {
-      next_address = ree.address();
+    } catch (const FiberReentryException& e) {
+      sigset_t set;
+      sigemptyset(&set);
+      sigaddset(&set, SIGRTMIN);
+      pthread_sigmask(SIG_UNBLOCK, &set, nullptr);
+      next_address = e.address;
     }
   }
+#else
+  if (setjmp(reentry_jmp_buf_) != 0) {
+    next_address = reentry_address_;
+  } else {
+    exit_code = static_cast<int>(kernel_state()->processor()->Execute(
+        thread_state_, address, args.data(), args.size()));
+    next_address = 0;
+  }
+
+  while (next_address != 0) {
+    if (setjmp(reentry_jmp_buf_) != 0) {
+      next_address = reentry_address_;
+    } else {
+      kernel_state()->processor()->ExecuteRaw(thread_state_, next_address);
+      next_address = 0;
+      if (want_exit_code) {
+        exit_code = static_cast<int>(thread_state_->context()->r[3]);
+      }
+    }
+  }
+#endif
 
   // If we got here it means the execute completed without an exit being called.
   // Treat the return code as an implicit exit code (if desired).
@@ -578,11 +613,18 @@ void XThread::Execute() {
 }
 
 void XThread::Reenter(uint32_t address) {
-  // TODO(gibbed): Maybe use setjmp/longjmp on Windows?
-  // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/longjmp#remarks
-  // On Windows with /EH, setjmp/longjmp do stack unwinding.
-  // Is there a better solution than exceptions for stack unwinding?
-  throw reenter_exception(address);
+  // Called when the game switches fiber stacks (e.g., via
+  // KeSetCurrentStackPointers in games like Forza Horizon 2).
+  // Must unwind through all frames between here and Execute().
+#if XE_PLATFORM_LINUX
+  // Throw a C++ exception that unwinds through JIT frames (using DWARF
+  // .eh_frame info) and host frames (using compiler-generated DWARF),
+  // calling destructors properly along the way.
+  throw FiberReentryException{address};
+#else
+  reentry_address_ = address;
+  std::longjmp(reentry_jmp_buf_, 1);
+#endif
 }
 
 void XThread::EnterCriticalRegion() {
@@ -710,19 +752,45 @@ uint32_t XThread::start_address() {
 
 X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
   auto guest_thread = guest_object<X_KTHREAD>();
+  uint32_t unused_host_suspend_count = 0;
 
+#if XE_PLATFORM_WIN32
   uint8_t previous_suspend_count =
       reinterpret_cast<std::atomic_uint8_t*>(&guest_thread->suspend_count)
           ->fetch_sub(1);
   if (out_suspend_count) {
     *out_suspend_count = previous_suspend_count;
   }
-  uint32_t unused_host_suspend_count = 0;
+
   if (thread_->Resume(&unused_host_suspend_count)) {
     return X_STATUS_SUCCESS;
   } else {
     return X_STATUS_UNSUCCESSFUL;
   }
+#elif XE_PLATFORM_LINUX
+  // Use mutex to protect suspend_count access and coordinate with SelfSuspend.
+  bool should_resume_host = false;
+  {
+    std::lock_guard<std::mutex> lock(suspend_mutex_);
+    uint8_t previous = guest_thread->suspend_count;
+    if (previous > 0) {
+      guest_thread->suspend_count--;
+    }
+    if (out_suspend_count) {
+      *out_suspend_count = previous;
+    }
+    should_resume_host = (guest_thread->suspend_count == 0);
+    suspend_cv_.notify_all();
+  }
+
+  // Try to resume host thread if fully resumed (for non-self-suspended case).
+  if (should_resume_host) {
+    thread_->Resume(&unused_host_suspend_count);
+  }
+  return X_STATUS_SUCCESS;
+#else
+#error "Unsupported platform"
+#endif
 }
 
 X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
@@ -752,6 +820,18 @@ X_STATUS XThread::Suspend(uint32_t* out_suspend_count) {
     return X_STATUS_UNSUCCESSFUL;
   }
 }
+
+#if XE_PLATFORM_LINUX
+uint32_t XThread::SelfSuspend() {
+  auto guest_thread = guest_object<X_KTHREAD>();
+  std::unique_lock<std::mutex> lock(suspend_mutex_);
+  uint32_t previous = guest_thread->suspend_count;
+  guest_thread->suspend_count++;
+  suspend_cv_.wait(
+      lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
+  return previous;
+}
+#endif
 
 X_STATUS XThread::Delay(uint32_t processor_mode, uint32_t alertable,
                         uint64_t interval) {

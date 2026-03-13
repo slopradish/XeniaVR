@@ -14,6 +14,14 @@
 #include <string>
 
 #include "xenia/base/mutex.h"
+#if XE_PLATFORM_LINUX
+#include <condition_variable>
+#include <csignal>
+#include <mutex>
+#endif
+#if XE_PLATFORM_WIN32
+#include <csetjmp>
+#endif
 #include "xenia/base/threading.h"
 #include "xenia/cpu/thread.h"
 #include "xenia/cpu/thread_state.h"
@@ -335,6 +343,15 @@ struct X_KTHREAD {
 };
 static_assert_size(X_KTHREAD, 0xAB0);
 
+#if XE_PLATFORM_LINUX
+// Exception thrown by XThread::Reenter() to unwind through JIT frames.
+// C++ exception unwinding uses DWARF .eh_frame info registered for JIT code,
+// ensuring destructors and RAII guards in host C++ frames are properly called.
+struct FiberReentryException {
+  uint32_t address;
+};
+#endif
+
 class XThread : public XObject, public cpu::Thread {
  public:
   static const XObject::Type kObjectType = XObject::Type::Thread;
@@ -425,6 +442,13 @@ class XThread : public XObject, public cpu::Thread {
   X_STATUS Delay(uint32_t processor_mode, uint32_t alertable,
                  uint64_t interval);
 
+#if XE_PLATFORM_LINUX
+  // Performs self-suspension: increments suspend_count and blocks until
+  // another thread calls Resume() and suspend_count reaches 0.
+  // Returns the previous suspend_count value.
+  uint32_t SelfSuspend();
+#endif
+
   xe::threading::Thread* thread() { return thread_.get(); }
 
   virtual bool Save(ByteStream* stream) override;
@@ -465,6 +489,21 @@ class XThread : public XObject, public cpu::Thread {
   bool running_ = false;
 
   int32_t priority_ = 0;
+
+#if XE_PLATFORM_LINUX
+  // Condition variable for thread self-suspension.
+  std::mutex suspend_mutex_;
+  std::condition_variable suspend_cv_;
+#endif
+
+  // Reentry mechanism for fiber-based stack switching.
+  // On Linux, C++ exceptions are used instead of setjmp/longjmp so that
+  // destructors and RAII guards in host C++ frames are properly unwound.
+  // JIT code has DWARF .eh_frame unwind info registered via __register_frame.
+#if XE_PLATFORM_WIN32
+  std::jmp_buf reentry_jmp_buf_;
+  uint32_t reentry_address_ = 0;
+#endif
 
   std::mutex thread_lock_;
 };

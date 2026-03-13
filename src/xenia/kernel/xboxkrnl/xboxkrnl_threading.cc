@@ -10,6 +10,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -236,12 +237,33 @@ dword_result_t NtSuspendThread_entry(dword_t handle,
     if (thread->type() == XObject::Type::Thread) {
       auto current_pcr = context->TranslateVirtualGPR<X_KPCR*>(context->r[13]);
 
+#if XE_PLATFORM_WIN32
       if (current_pcr->prcb_data.current_thread == thread->guest_object() ||
           !thread->guest_object<X_KTHREAD>()->terminated) {
         result = thread->Suspend(&suspend_count);
       } else {
         return X_STATUS_THREAD_IS_TERMINATING;
       }
+#elif XE_PLATFORM_LINUX
+      // Handle self-suspension specially to avoid deadlock.
+      if (!thread->guest_object<X_KTHREAD>()->terminated) {
+        bool is_self_suspend =
+            (current_pcr->prcb_data.current_thread == thread->guest_object());
+
+        if (is_self_suspend) {
+          XELOGD("Thread {:X} self-suspending", thread->handle());
+          suspend_count = thread->SelfSuspend();
+          result = X_STATUS_SUCCESS;
+          XELOGD("Thread {:X} resumed", thread->handle());
+        } else {
+          result = thread->Suspend(&suspend_count);
+        }
+      } else {
+        return X_STATUS_THREAD_IS_TERMINATING;
+      }
+#else
+#error "Unsupported platform"
+#endif
     } else {
       return X_STATUS_OBJECT_TYPE_MISMATCH;
     }
@@ -690,7 +712,10 @@ uint32_t xeKeReleaseSemaphore(X_KSEMAPHORE* semaphore_ptr, uint32_t increment,
   // TODO(benvanik): increment thread priority?
   // TODO(benvanik): wait?
 
-  return sem->ReleaseSemaphore(adjustment);
+  int32_t previous_count = 0;
+  [[maybe_unused]] bool success =
+      sem->ReleaseSemaphore(adjustment, &previous_count);
+  return static_cast<uint32_t>(previous_count);
 }
 
 dword_result_t KeReleaseSemaphore_entry(pointer_t<X_KSEMAPHORE> semaphore_ptr,
@@ -749,7 +774,17 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
   auto sem =
       kernel_state()->object_table()->LookupObject<XSemaphore>(sem_handle);
   if (sem) {
-    previous_count = sem->ReleaseSemaphore((int32_t)release_count);
+    bool success =
+        sem->ReleaseSemaphore((int32_t)release_count, &previous_count);
+    if (!success) {
+      // Releasing would exceed the semaphore's maximum count
+      // Windows returns STATUS_SEMAPHORE_LIMIT_EXCEEDED (0x0000012B)
+      XELOGW(
+          "NtReleaseSemaphore: release_count={} would exceed maximum (current "
+          "count={})",
+          uint32_t(release_count), previous_count);
+      result = 0x0000012B;
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -1122,8 +1157,8 @@ DECLARE_XBOXKRNL_EXPORT3(KfAcquireSpinLock, kThreading, kImplemented, kBlocking,
 void xeKeKfReleaseSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
                            uint32_t old_irql, bool change_irql) {
   assert_true(lock->prcb_of_owner == static_cast<uint32_t>(ctx->r[13]));
-  // Unlock.
-  lock->prcb_of_owner.value = 0;
+  // Unlock with release semantics to ensure all prior writes are visible.
+  xe::atomic_store_release(0u, &lock->prcb_of_owner.value);
 
   if (change_irql) {
     // Unlock.

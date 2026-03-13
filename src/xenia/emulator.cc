@@ -1288,6 +1288,19 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   crash_msg.append(
       fmt::format("PC: 0x{:08X}\n",
                   guest_function->MapMachineCodeToGuestAddress(ex->pc())));
+  if (ex->code() == Exception::Code::kAccessViolation) {
+    const char* op_str = "unknown";
+    if (ex->access_violation_operation() ==
+        Exception::AccessViolationOperation::kRead)
+      op_str = "read";
+    else if (ex->access_violation_operation() ==
+             Exception::AccessViolationOperation::kWrite)
+      op_str = "write";
+    crash_msg.append(fmt::format("Access Violation: {} at 0x{:016X}\n", op_str,
+                                 ex->fault_address()));
+  } else if (ex->code() == Exception::Code::kIllegalInstruction) {
+    crash_msg.append("Illegal Instruction\n");
+  }
   crash_msg.append("Registers:\n");
   for (int i = 0; i < 32; i++) {
     crash_msg.append(fmt::format(" r{:<3} = {:016X}\n", i, context->r[i]));
@@ -1648,14 +1661,17 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
     }
   }
 
-  // Initializing the shader storage in a blocking way so the user doesn't
-  // miss the initial seconds - for instance, sound from an intro video may
-  // start playing before the video can be seen if doing this in parallel with
-  // the main thread.
-  on_shader_storage_initialization(true);
-  graphics_system_->InitializeShaderStorage(cache_root_, title_id_.value(),
-                                            true);
-  on_shader_storage_initialization(false);
+  // Initialize shader storage asynchronously - pipeline compilation happens in
+  // background while the game goes through its normal startup (loading screens,
+  // intro videos, etc.). With async_shader_compilation enabled, draws are
+  // skipped until pipelines are ready, so this is safe. By the time actual
+  // gameplay starts, most cached pipelines should be compiled.
+  if (graphics_system_) {
+    on_shader_storage_initialization(true);
+    graphics_system_->InitializeShaderStorage(
+        cache_root_, title_id_.value(), false,
+        [this]() { on_shader_storage_initialization(false); });
+  }
 
   auto main_thread = kernel_state_->LaunchModule(module);
   if (!main_thread) {
