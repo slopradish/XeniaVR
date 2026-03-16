@@ -549,6 +549,9 @@ TestResult RunTestInChildProcess(TestSuite& test_suite, TestCase& test_case) {
       case SIGABRT:
         signal_name = "SIGABRT";
         break;
+      case SIGTRAP:
+        signal_name = "SIGTRAP";
+        break;
     }
     fprintf(stderr, "  [%s] CRASHED (%s)\n", test_case.name.c_str(),
             signal_name);
@@ -575,9 +578,6 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
     }
     if (runner.Run(test_case)) {
       ++passed_count;
-      // Print progress dot
-      fprintf(stdout, ".");
-      fflush(stdout);
     } else {
       fprintf(stderr, "  [%s] FAILED\n", test_case.name.c_str());
       fflush(stderr);
@@ -603,7 +603,7 @@ void ProtectedRunTest(TestSuite& test_suite, TestRunner& runner,
 #endif  // XE_COMPILER_MSVC
 }
 
-bool RunTests(const std::string_view test_name) {
+bool RunTests(const std::vector<std::string>& test_names) {
   int result_code = 1;
   int failed_count = 0;
   int passed_count = 0;
@@ -615,8 +615,16 @@ bool RunTests(const std::string_view test_name) {
   // Load skip list
   auto skip_list = LoadSkipList(cvars::test_skip_file);
   if (!skip_list.empty()) {
-    XELOGI("Loaded skip list with {} test cases to skip.", skip_list.size());
+    fprintf(stderr, "Loaded skip list with %zu test cases to skip.\n",
+            skip_list.size());
+  } else {
+    fprintf(stderr, "Warning: skip list is empty (path: %s)\n",
+            cvars::test_skip_file.string().c_str());
   }
+
+  // Build a set of requested test names for fast lookup
+  std::unordered_set<std::string> test_name_filter(test_names.begin(),
+                                                   test_names.end());
 
   auto test_path_root = cvars::test_path;
   std::vector<std::filesystem::path> test_files;
@@ -634,7 +642,8 @@ bool RunTests(const std::string_view test_name) {
   bool load_failed = false;
   for (auto& test_path : test_files) {
     TestSuite test_suite(test_path);
-    if (!test_name.empty() && test_suite.name() != test_name) {
+    if (!test_name_filter.empty() &&
+        test_name_filter.find(test_suite.name()) == test_name_filter.end()) {
       continue;
     }
     if (!test_suite.Load()) {
@@ -650,22 +659,25 @@ bool RunTests(const std::string_view test_name) {
 
   XELOGI("{} tests loaded.", test_suites.size());
 
-  // Collect all test cases across all suites, filtering out skipped tests
-  std::vector<std::pair<TestSuite*, TestCase*>> all_tests;
+  // Count test cases across all suites, filtering out skipped tests
   int skipped_count = 0;
+  size_t total_cases = 0;
   for (auto& test_suite : test_suites) {
     for (auto& test_case : test_suite.test_cases()) {
       if (skip_list.find(test_case.name) != skip_list.end()) {
         ++skipped_count;
-        continue;  // Skip this test
+      } else {
+        ++total_cases;
       }
-      all_tests.push_back({&test_suite, &test_case});
     }
   }
 
   if (skipped_count > 0) {
-    XELOGI("{} test cases skipped based on skip list.", skipped_count);
+    fprintf(stderr, "Skipped %d test cases based on skip list.\n",
+            skipped_count);
   }
+  fprintf(stderr, "Running %zu test suites, %zu test cases...\n",
+          test_suites.size(), total_cases);
 
 #if XE_COMPILER_MSVC
   // On Windows, use a single shared test runner
@@ -676,11 +688,26 @@ bool RunTests(const std::string_view test_name) {
   TestRunner* runner_ptr = nullptr;
   TestRunner& runner = *runner_ptr;  // Never dereferenced on POSIX
 #endif
-  for (auto& [suite, tcase] : all_tests) {
-    ProtectedRunTest(*suite, runner, *tcase, failed_count, passed_count);
+
+  // Run tests grouped by suite, printing a dot after each suite completes
+  for (auto& test_suite : test_suites) {
+    bool suite_has_tests = false;
+    for (auto& test_case : test_suite.test_cases()) {
+      if (skip_list.find(test_case.name) != skip_list.end()) {
+        continue;
+      }
+      suite_has_tests = true;
+      ProtectedRunTest(test_suite, runner, test_case, failed_count,
+                       passed_count);
+    }
+    if (suite_has_tests) {
+      fprintf(stdout, ".");
+      fflush(stdout);
+    }
   }
 
-  fprintf(stderr, "\n");
+  fprintf(stdout, "\n");
+  fflush(stdout);
   fprintf(stderr, "Total tests: %d\n", failed_count + passed_count);
   fprintf(stderr, "Passed: %d\n", passed_count);
   fprintf(stderr, "Failed: %d\n", failed_count);
@@ -690,12 +717,25 @@ bool RunTests(const std::string_view test_name) {
 }
 
 int main(const std::vector<std::string>& args) {
-  return RunTests(cvars::test_name) ? 0 : 1;
+  std::vector<std::string> test_names;
+  // Collect test names from all positional arguments.
+  // argv[0] is the program name, skip it. Also skip --flag arguments
+  // since those are handled by cvar parsing.
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (!args[i].empty() && args[i][0] != '-') {
+      test_names.push_back(args[i]);
+    }
+  }
+  // Fall back to --test_name flag if no positional args given
+  if (test_names.empty() && !cvars::test_name.empty()) {
+    test_names.push_back(cvars::test_name);
+  }
+  return RunTests(test_names) ? 0 : 1;
 }
 
 }  // namespace test
 }  // namespace cpu
 }  // namespace xe
 
-XE_DEFINE_CONSOLE_APP("xenia-cpu-ppc-test", xe::cpu::test::main, "[test name]",
-                      "test_name");
+XE_DEFINE_CONSOLE_APP("xenia-cpu-ppc-test", xe::cpu::test::main,
+                      "[test names...]", "test_name");
