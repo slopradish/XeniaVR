@@ -13,6 +13,7 @@ from argparse import ArgumentParser
 from glob import glob
 from json import loads as jsonloads
 import os
+from re import findall as re_findall
 from shutil import rmtree
 import subprocess
 import sys
@@ -594,11 +595,22 @@ def get_pr_number():
 def git_submodule_update():
     """Runs a git submodule sync, init, and update.
     """
+    if sys.platform == "linux":
+        submodules_ignore = ["DirectX-Headers", "DirectXShaderCompiler"]
+    else:
+        submodules_ignore = None
+    if submodules_ignore:
+        with open(".gitmodules") as f:
+            gitmodules = f.read()
+        submodules = re_findall(r"(?<=path = )(?!third_party\/(?:" + "|".join(submodules_ignore) + r")).+", gitmodules)
+    else:
+        submodules = None
     # Sync submodule URLs from .gitmodules to local config
     shell_call([
         "git",
         "submodule",
         "sync",
+        *(submodules or []),
         ])
     # Then update all submodules to their recorded commits
     shell_call([
@@ -610,6 +622,7 @@ def git_submodule_update():
         "--init",
         "--depth=1",
         "-j", f"{os.cpu_count()}",
+        *(submodules or []),
         ])
 
 
@@ -946,9 +959,8 @@ class PullCommand(Command):
             "checkout",
             default_branch,
             ])
-        print("")
 
-        print("- pulling self...")
+        print("\n- pulling self...")
         if args["merge"]:
             shell_call([
                 "git",
@@ -963,9 +975,8 @@ class PullCommand(Command):
 
         print("\n- pulling dependencies...")
         git_submodule_update()
-        print("")
 
-        print("- running cmake configure...")
+        print("\n- running cmake configure...")
         if run_cmake_configure() == 0:
             print_status(ResultStatus.SUCCESS)
 
@@ -1937,9 +1948,13 @@ class DevenvCommand(Command):
                 "-A", "x64",
                 "-DXENIA_BUILD_TESTS=ON",
             ])
-            sln_path = os.path.join(vs_build_dir, "xenia.sln")
-            print(f"Opening {sln_path} in Visual Studio...")
-            shell_call(["devenv", sln_path])
+            # Since VS 2026 default solution extension is slnx.
+            slnx_path = os.path.join(vs_build_dir, "xenia.slnx")
+            if not os.path.exists(slnx_path):
+                slnx_path = os.path.join(vs_build_dir, "xenia.sln")
+
+            print(f"Opening {slnx_path} in Visual Studio...")
+            shell_call(["devenv", slnx_path])
         elif has_bin("clion"):
             shell_call(["clion", "."])
         elif has_bin("clion.sh"):

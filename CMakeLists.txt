@@ -35,10 +35,11 @@ else()
   set(XE_PLATFORM_NAME "Linux")
 endif()
 
-# Output directories (use PROJECT_SOURCE_DIR so VS and Ninja share the same paths)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin/${XE_PLATFORM_NAME}")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin/${XE_PLATFORM_NAME}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/obj/${XE_PLATFORM_NAME}")
+# Output directories — use CMAKE_BINARY_DIR so each build tree (build/, build-arm64/,
+# build/vs-arm64/, etc.) gets its own output paths.
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${XE_PLATFORM_NAME}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${XE_PLATFORM_NAME}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/obj/${XE_PLATFORM_NAME}")
 
 # Create scratch/ if needed
 file(MAKE_DIRECTORY "${PROJECT_SOURCE_DIR}/scratch")
@@ -53,6 +54,7 @@ include(cmake/XeniaHelpers.cmake)
 include_directories(
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/src
+  ${CMAKE_BINARY_DIR}
   ${PROJECT_SOURCE_DIR}/third_party
 )
 
@@ -93,6 +95,7 @@ if(MSVC)
     /ignore:4006  # Ignores complaints about empty obj files
     /ignore:4221
   )
+
   # Global Windows system libraries
   link_libraries(
     ntdll wsock32 ws2_32 xinput comctl32 shcore shlwapi dxguid bcrypt
@@ -122,6 +125,10 @@ if(MSVC)
   add_compile_definitions($<$<CONFIG:Release>:_NO_DEBUG_HEAP=1>)
   add_compile_options($<$<CONFIG:Release>:/Gw>)
   add_compile_options($<$<CONFIG:Release>:/GS->)  # NoBufferSecurityCheck
+  add_compile_options($<$<CONFIG:Release>:/Zi>)    # Generate PDB debug info
+  add_link_options($<$<CONFIG:Release>:/DEBUG>)     # Emit .pdb for the linked binary
+  add_link_options($<$<CONFIG:Release>:/OPT:REF>)   # Remove unreferenced functions/data
+  add_link_options($<$<CONFIG:Release>:/OPT:ICF>)   # Fold identical COMDATs
   # Replace /Ob2 with /Ob3 in CMake's default Release flags
   string(REPLACE "/Ob2" "/Ob3" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
   string(REPLACE "/Ob2" "/Ob3" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
