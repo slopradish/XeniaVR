@@ -27,10 +27,8 @@ DEFINE_bool(enable_rmw_context_merging, false,
             "Permit merging read-modify-write HIR instr sequences together "
             "into x86 instructions that use a memory operand.",
             "x64");
-DEFINE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses, true,
-            "Uses info gathered via record_mmio_access_exceptions to emit "
-            "special stores that are faster than trapping the exception",
-            "CPU");
+DECLARE_bool(emit_mmio_aware_stores_for_recorded_exception_addresses);
+DECLARE_bool(emit_inline_mmio_checks);
 
 namespace xe {
 namespace cpu {
@@ -632,49 +630,49 @@ EMITTER_OPCODE_TABLE(OPCODE_ATOMIC_COMPARE_EXCHANGE,
 struct LOAD_LOCAL_I8
     : Sequence<LOAD_LOCAL_I8, I<OPCODE_LOAD_LOCAL, I8Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.mov(i.dest, e.byte[e.GetLocalsBase() + i.src1.constant()]);
+    e.mov(i.dest, e.byte[e.rsp + i.src1.constant()]);
     // e.TraceLoadI8(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
 struct LOAD_LOCAL_I16
     : Sequence<LOAD_LOCAL_I16, I<OPCODE_LOAD_LOCAL, I16Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.mov(i.dest, e.word[e.GetLocalsBase() + i.src1.constant()]);
+    e.mov(i.dest, e.word[e.rsp + i.src1.constant()]);
     // e.TraceLoadI16(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
 struct LOAD_LOCAL_I32
     : Sequence<LOAD_LOCAL_I32, I<OPCODE_LOAD_LOCAL, I32Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.mov(i.dest, e.dword[e.GetLocalsBase() + i.src1.constant()]);
+    e.mov(i.dest, e.dword[e.rsp + i.src1.constant()]);
     // e.TraceLoadI32(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
 struct LOAD_LOCAL_I64
     : Sequence<LOAD_LOCAL_I64, I<OPCODE_LOAD_LOCAL, I64Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.mov(i.dest, e.qword[e.GetLocalsBase() + i.src1.constant()]);
+    e.mov(i.dest, e.qword[e.rsp + i.src1.constant()]);
     // e.TraceLoadI64(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
 struct LOAD_LOCAL_F32
     : Sequence<LOAD_LOCAL_F32, I<OPCODE_LOAD_LOCAL, F32Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vmovss(i.dest, e.dword[e.GetLocalsBase() + i.src1.constant()]);
+    e.vmovss(i.dest, e.dword[e.rsp + i.src1.constant()]);
     // e.TraceLoadF32(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
 struct LOAD_LOCAL_F64
     : Sequence<LOAD_LOCAL_F64, I<OPCODE_LOAD_LOCAL, F64Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vmovsd(i.dest, e.qword[e.GetLocalsBase() + i.src1.constant()]);
+    e.vmovsd(i.dest, e.qword[e.rsp + i.src1.constant()]);
     // e.TraceLoadF64(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
 struct LOAD_LOCAL_V128
     : Sequence<LOAD_LOCAL_V128, I<OPCODE_LOAD_LOCAL, V128Op, I32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
-    e.vmovaps(i.dest, e.ptr[e.GetLocalsBase() + i.src1.constant()]);
+    e.vmovaps(i.dest, e.ptr[e.rsp + i.src1.constant()]);
     // e.TraceLoadV128(DATA_LOCAL, i.src1.constant, i.dest);
   }
 };
@@ -690,7 +688,7 @@ struct STORE_LOCAL_I8
     : Sequence<STORE_LOCAL_I8, I<OPCODE_STORE_LOCAL, VoidOp, I32Op, I8Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     // e.TraceStoreI8(DATA_LOCAL, i.src1.constant, i.src2);
-    e.mov(e.byte[e.GetLocalsBase() + i.src1.constant()], i.src2);
+    e.mov(e.byte[e.rsp + i.src1.constant()], i.src2);
   }
 };
 
@@ -704,10 +702,9 @@ struct STORE_LOCAL_I16
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     // e.TraceStoreI16(DATA_LOCAL, i.src1.constant, i.src2);
     if (LocalStoreMayUseMembaseLow(e, i)) {
-      e.mov(e.word[e.GetLocalsBase() + i.src1.constant()],
-            e.GetMembaseReg().cvt16());
+      e.mov(e.word[e.rsp + i.src1.constant()], e.GetMembaseReg().cvt16());
     } else {
-      e.mov(e.word[e.GetLocalsBase() + i.src1.constant()], i.src2);
+      e.mov(e.word[e.rsp + i.src1.constant()], i.src2);
     }
   }
 };
@@ -716,10 +713,9 @@ struct STORE_LOCAL_I32
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     // e.TraceStoreI32(DATA_LOCAL, i.src1.constant, i.src2);
     if (LocalStoreMayUseMembaseLow(e, i)) {
-      e.mov(e.dword[e.GetLocalsBase() + i.src1.constant()],
-            e.GetMembaseReg().cvt32());
+      e.mov(e.dword[e.rsp + i.src1.constant()], e.GetMembaseReg().cvt32());
     } else {
-      e.mov(e.dword[e.GetLocalsBase() + i.src1.constant()], i.src2);
+      e.mov(e.dword[e.rsp + i.src1.constant()], i.src2);
     }
   }
 };
@@ -729,9 +725,9 @@ struct STORE_LOCAL_I64
     // e.TraceStoreI64(DATA_LOCAL, i.src1.constant, i.src2);
     if (i.src2.is_constant && i.src2.constant() == 0) {
       e.xor_(e.eax, e.eax);
-      e.mov(e.qword[e.GetLocalsBase() + i.src1.constant()], e.rax);
+      e.mov(e.qword[e.rsp + i.src1.constant()], e.rax);
     } else {
-      e.mov(e.qword[e.GetLocalsBase() + i.src1.constant()], i.src2);
+      e.mov(e.qword[e.rsp + i.src1.constant()], i.src2);
     }
   }
 };
@@ -739,21 +735,21 @@ struct STORE_LOCAL_F32
     : Sequence<STORE_LOCAL_F32, I<OPCODE_STORE_LOCAL, VoidOp, I32Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     // e.TraceStoreF32(DATA_LOCAL, i.src1.constant, i.src2);
-    e.vmovss(e.dword[e.GetLocalsBase() + i.src1.constant()], i.src2);
+    e.vmovss(e.dword[e.rsp + i.src1.constant()], i.src2);
   }
 };
 struct STORE_LOCAL_F64
     : Sequence<STORE_LOCAL_F64, I<OPCODE_STORE_LOCAL, VoidOp, I32Op, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     // e.TraceStoreF64(DATA_LOCAL, i.src1.constant, i.src2);
-    e.vmovsd(e.qword[e.GetLocalsBase() + i.src1.constant()], i.src2);
+    e.vmovsd(e.qword[e.rsp + i.src1.constant()], i.src2);
   }
 };
 struct STORE_LOCAL_V128
     : Sequence<STORE_LOCAL_V128, I<OPCODE_STORE_LOCAL, VoidOp, I32Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     // e.TraceStoreV128(DATA_LOCAL, i.src1.constant, i.src2);
-    e.vmovaps(e.ptr[e.GetLocalsBase() + i.src1.constant()], i.src2);
+    e.vmovaps(e.ptr[e.rsp + i.src1.constant()], i.src2);
   }
 };
 EMITTER_OPCODE_TABLE(OPCODE_STORE_LOCAL, STORE_LOCAL_I8, STORE_LOCAL_I16,
@@ -1294,6 +1290,35 @@ struct LOAD_OFFSET_I32
       e.CallNativeSafe(addrptr);
       e.mov(i.dest, e.eax);
     } else {
+      Xbyak::Label normal_access, done;
+      bool inline_mmio = cvars::emit_inline_mmio_checks && !IsTracingData();
+      if (inline_mmio) {
+        // Compute guest address (src1 + src2) for range check.
+        if (i.src1.is_constant) {
+          e.mov(e.eax, (uint32_t)i.src1.constant());
+        } else {
+          e.mov(e.eax, i.src1.reg().cvt32());
+        }
+        if (i.src2.is_constant) {
+          e.add(e.eax, (uint32_t)i.src2.constant());
+        } else {
+          e.add(e.eax, i.src2.reg().cvt32());
+        }
+        e.cmp(e.eax, 0x7FC00000);
+        e.jb(normal_access, e.T_NEAR);
+        e.cmp(e.eax, 0x7FFFFFFF);
+        e.ja(normal_access, e.T_NEAR);
+        // MMIO path
+        void* mmio_fn = (void*)&MMIOAwareLoad<uint32_t, false>;
+        if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+          mmio_fn = (void*)&MMIOAwareLoad<uint32_t, true>;
+        }
+        e.mov(e.GetNativeParam(0).cvt32(), e.eax);
+        e.CallNativeSafe(mmio_fn);
+        e.mov(i.dest, e.eax);
+        e.jmp(done, e.T_NEAR);
+        e.L(normal_access);
+      }
       auto addr = ComputeMemoryAddressOffset(e, i.src1, i.src2);
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         if (e.IsFeatureEnabled(kX64EmitMovbe)) {
@@ -1304,6 +1329,9 @@ struct LOAD_OFFSET_I32
         }
       } else {
         e.mov(i.dest, e.dword[addr]);
+      }
+      if (inline_mmio) {
+        e.L(done);
       }
     }
   }
@@ -1351,11 +1379,15 @@ struct STORE_OFFSET_I16
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src3.is_constant);
-      if (e.IsFeatureEnabled(kX64EmitMovbe)) {
+      if (i.src3.is_constant) {
+        e.mov(e.word[addr],
+              xe::byte_swap(static_cast<uint16_t>(i.src3.constant())));
+      } else if (e.IsFeatureEnabled(kX64EmitMovbe)) {
         e.movbe(e.word[addr], i.src3);
       } else {
-        assert_always("not implemented");
+        e.movzx(e.ecx, i.src3);
+        e.ror(e.cx, 8);
+        e.mov(e.word[addr], e.cx);
       }
     } else {
       if (i.src3.is_constant) {
@@ -1399,13 +1431,50 @@ struct STORE_OFFSET_I32
       e.CallNativeSafe(addrptr);
 
     } else {
+      Xbyak::Label normal_access, done;
+      bool inline_mmio = cvars::emit_inline_mmio_checks && !IsTracingData();
+      if (inline_mmio) {
+        // Compute guest address (src1 + src2) for range check.
+        if (i.src1.is_constant) {
+          e.mov(e.eax, (uint32_t)i.src1.constant());
+        } else {
+          e.mov(e.eax, i.src1.reg().cvt32());
+        }
+        if (i.src2.is_constant) {
+          e.add(e.eax, (uint32_t)i.src2.constant());
+        } else {
+          e.add(e.eax, i.src2.reg().cvt32());
+        }
+        e.cmp(e.eax, 0x7FC00000);
+        e.jb(normal_access, e.T_NEAR);
+        e.cmp(e.eax, 0x7FFFFFFF);
+        e.ja(normal_access, e.T_NEAR);
+        // MMIO path
+        void* mmio_fn = (void*)&MMIOAwareStore<uint32_t, false>;
+        if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+          mmio_fn = (void*)&MMIOAwareStore<uint32_t, true>;
+        }
+        e.mov(e.GetNativeParam(0).cvt32(), e.eax);
+        if (i.src3.is_constant) {
+          e.mov(e.GetNativeParam(1).cvt32(), i.src3.constant());
+        } else {
+          e.mov(e.GetNativeParam(1).cvt32(), i.src3);
+        }
+        e.CallNativeSafe(mmio_fn);
+        e.jmp(done, e.T_NEAR);
+        e.L(normal_access);
+      }
       auto addr = ComputeMemoryAddressOffset(e, i.src1, i.src2);
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-        assert_false(i.src3.is_constant);
-        if (e.IsFeatureEnabled(kX64EmitMovbe)) {
+        if (i.src3.is_constant) {
+          e.mov(e.dword[addr],
+                xe::byte_swap(static_cast<uint32_t>(i.src3.constant())));
+        } else if (e.IsFeatureEnabled(kX64EmitMovbe)) {
           e.movbe(e.dword[addr], i.src3);
         } else {
-          assert_always("not implemented");
+          e.mov(e.ecx, i.src3);
+          e.bswap(e.ecx);
+          e.mov(e.dword[addr], e.ecx);
         }
       } else {
         if (i.src3.is_constant) {
@@ -1418,6 +1487,9 @@ struct STORE_OFFSET_I32
           e.mov(e.dword[addr], i.src3);
         }
       }
+      if (inline_mmio) {
+        e.L(done);
+      }
     }
   }
 };
@@ -1428,11 +1500,15 @@ struct STORE_OFFSET_I64
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddressOffset(e, i.src1, i.src2);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src3.is_constant);
-      if (e.IsFeatureEnabled(kX64EmitMovbe)) {
+      if (i.src3.is_constant) {
+        e.MovMem64(addr,
+                   xe::byte_swap(static_cast<uint64_t>(i.src3.constant())));
+      } else if (e.IsFeatureEnabled(kX64EmitMovbe)) {
         e.movbe(e.qword[addr], i.src3);
       } else {
-        assert_always("not implemented");
+        e.mov(e.rcx, i.src3);
+        e.bswap(e.rcx);
+        e.mov(e.qword[addr], e.rcx);
       }
     } else {
       if (i.src3.is_constant) {
@@ -1497,6 +1573,30 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
       e.CallNativeSafe(addrptr);
       e.mov(i.dest, e.eax);
     } else {
+      Xbyak::Label normal_access, done;
+      bool inline_mmio = cvars::emit_inline_mmio_checks && !IsTracingData();
+      if (inline_mmio) {
+        // Compute guest address for range check.
+        if (i.src1.is_constant) {
+          e.mov(e.eax, (uint32_t)i.src1.constant());
+        } else {
+          e.mov(e.eax, i.src1.reg().cvt32());
+        }
+        e.cmp(e.eax, 0x7FC00000);
+        e.jb(normal_access, e.T_NEAR);
+        e.cmp(e.eax, 0x7FFFFFFF);
+        e.ja(normal_access, e.T_NEAR);
+        // MMIO path
+        void* mmio_fn = (void*)&MMIOAwareLoad<uint32_t, false>;
+        if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+          mmio_fn = (void*)&MMIOAwareLoad<uint32_t, true>;
+        }
+        e.mov(e.GetNativeParam(0).cvt32(), e.eax);
+        e.CallNativeSafe(mmio_fn);
+        e.mov(i.dest, e.eax);
+        e.jmp(done, e.T_NEAR);
+        e.L(normal_access);
+      }
       auto addr = ComputeMemoryAddress(e, i.src1);
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
         if (e.IsFeatureEnabled(kX64EmitMovbe)) {
@@ -1512,6 +1612,9 @@ struct LOAD_I32 : Sequence<LOAD_I32, I<OPCODE_LOAD, I32Op, I64Op>> {
         e.mov(e.GetNativeParam(1).cvt32(), i.dest);
         e.lea(e.GetNativeParam(0), e.ptr[addr]);
         e.CallNative(reinterpret_cast<void*>(TraceMemoryLoadI32));
+      }
+      if (inline_mmio) {
+        e.L(done);
       }
     }
   }
@@ -1539,9 +1642,13 @@ struct LOAD_I64 : Sequence<LOAD_I64, I<OPCODE_LOAD, I64Op, I64Op>> {
 struct LOAD_F32 : Sequence<LOAD_F32, I<OPCODE_LOAD, F32Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.vmovss(i.dest, e.dword[addr]);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_always("not implemented yet");
+      // Load as integer, byte-swap, move to XMM.
+      e.mov(e.eax, e.dword[addr]);
+      e.bswap(e.eax);
+      e.vmovd(i.dest, e.eax);
+    } else {
+      e.vmovss(i.dest, e.dword[addr]);
     }
     if (IsTracingData()) {
       e.lea(e.GetNativeParam(1), e.dword[addr]);
@@ -1553,9 +1660,13 @@ struct LOAD_F32 : Sequence<LOAD_F32, I<OPCODE_LOAD, F32Op, I64Op>> {
 struct LOAD_F64 : Sequence<LOAD_F64, I<OPCODE_LOAD, F64Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
-    e.vmovsd(i.dest, e.qword[addr]);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_always("not implemented yet");
+      // Load as integer, byte-swap, move to XMM.
+      e.mov(e.rax, e.qword[addr]);
+      e.bswap(e.rax);
+      e.vmovq(i.dest, e.rax);
+    } else {
+      e.vmovsd(i.dest, e.qword[addr]);
     }
     if (IsTracingData()) {
       e.lea(e.GetNativeParam(1), e.qword[addr]);
@@ -1607,11 +1718,15 @@ struct STORE_I16 : Sequence<STORE_I16, I<OPCODE_STORE, VoidOp, I64Op, I16Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      if (e.IsFeatureEnabled(kX64EmitMovbe)) {
+      if (i.src2.is_constant) {
+        e.mov(e.word[addr],
+              xe::byte_swap(static_cast<uint16_t>(i.src2.constant())));
+      } else if (e.IsFeatureEnabled(kX64EmitMovbe)) {
         e.movbe(e.word[addr], i.src2);
       } else {
-        assert_always("not implemented");
+        e.movzx(e.ecx, i.src2);
+        e.ror(e.cx, 8);
+        e.mov(e.word[addr], e.cx);
       }
     } else {
       if (i.src2.is_constant) {
@@ -1649,13 +1764,45 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
       e.CallNativeSafe(addrptr);
 
     } else {
+      Xbyak::Label normal_access, done;
+      bool inline_mmio = cvars::emit_inline_mmio_checks && !IsTracingData();
+      if (inline_mmio) {
+        // Compute guest address for range check.
+        if (i.src1.is_constant) {
+          e.mov(e.eax, (uint32_t)i.src1.constant());
+        } else {
+          e.mov(e.eax, i.src1.reg().cvt32());
+        }
+        e.cmp(e.eax, 0x7FC00000);
+        e.jb(normal_access, e.T_NEAR);
+        e.cmp(e.eax, 0x7FFFFFFF);
+        e.ja(normal_access, e.T_NEAR);
+        // MMIO path
+        void* mmio_fn = (void*)&MMIOAwareStore<uint32_t, false>;
+        if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
+          mmio_fn = (void*)&MMIOAwareStore<uint32_t, true>;
+        }
+        e.mov(e.GetNativeParam(0).cvt32(), e.eax);
+        if (i.src2.is_constant) {
+          e.mov(e.GetNativeParam(1).cvt32(), i.src2.constant());
+        } else {
+          e.mov(e.GetNativeParam(1).cvt32(), i.src2);
+        }
+        e.CallNativeSafe(mmio_fn);
+        e.jmp(done, e.T_NEAR);
+        e.L(normal_access);
+      }
       auto addr = ComputeMemoryAddress(e, i.src1);
       if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-        assert_false(i.src2.is_constant);
-        if (e.IsFeatureEnabled(kX64EmitMovbe)) {
+        if (i.src2.is_constant) {
+          e.mov(e.dword[addr],
+                xe::byte_swap(static_cast<uint32_t>(i.src2.constant())));
+        } else if (e.IsFeatureEnabled(kX64EmitMovbe)) {
           e.movbe(e.dword[addr], i.src2);
         } else {
-          assert_always("not implemented");
+          e.mov(e.ecx, i.src2);
+          e.bswap(e.ecx);
+          e.mov(e.dword[addr], e.ecx);
         }
       } else {
         if (i.src2.is_constant) {
@@ -1669,6 +1816,9 @@ struct STORE_I32 : Sequence<STORE_I32, I<OPCODE_STORE, VoidOp, I64Op, I32Op>> {
           e.CallNative(reinterpret_cast<void*>(TraceMemoryStoreI32));
         }
       }
+      if (inline_mmio) {
+        e.L(done);
+      }
     }
   }
 };
@@ -1676,11 +1826,16 @@ struct STORE_I64 : Sequence<STORE_I64, I<OPCODE_STORE, VoidOp, I64Op, I64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      if (e.IsFeatureEnabled(kX64EmitMovbe)) {
+      if (i.src2.is_constant) {
+        // MovMem64 avoids clobbering rax (used by ComputeMemoryAddress).
+        e.MovMem64(addr,
+                   xe::byte_swap(static_cast<uint64_t>(i.src2.constant())));
+      } else if (e.IsFeatureEnabled(kX64EmitMovbe)) {
         e.movbe(e.qword[addr], i.src2);
       } else {
-        assert_always("not implemented");
+        e.mov(e.rcx, i.src2);
+        e.bswap(e.rcx);
+        e.mov(e.qword[addr], e.rcx);
       }
     } else {
       if (i.src2.is_constant) {
@@ -1701,8 +1856,14 @@ struct STORE_F32 : Sequence<STORE_F32, I<OPCODE_STORE, VoidOp, I64Op, F32Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      assert_always("not yet implemented");
+      if (i.src2.is_constant) {
+        e.mov(e.dword[addr],
+              xe::byte_swap(static_cast<uint32_t>(i.src2.value->constant.i32)));
+      } else {
+        e.vmovd(e.ecx, i.src2);
+        e.bswap(e.ecx);
+        e.mov(e.dword[addr], e.ecx);
+      }
     } else {
       if (i.src2.is_constant) {
         e.mov(e.dword[addr], i.src2.value->constant.i32);
@@ -1722,8 +1883,15 @@ struct STORE_F64 : Sequence<STORE_F64, I<OPCODE_STORE, VoidOp, I64Op, F64Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      assert_always("not yet implemented");
+      if (i.src2.is_constant) {
+        e.MovMem64(
+            addr,
+            xe::byte_swap(static_cast<uint64_t>(i.src2.value->constant.i64)));
+      } else {
+        e.vmovq(e.rcx, i.src2);
+        e.bswap(e.rcx);
+        e.mov(e.qword[addr], e.rcx);
+      }
     } else {
       if (i.src2.is_constant) {
         e.MovMem64(addr, i.src2.value->constant.i64);
@@ -1744,10 +1912,12 @@ struct STORE_V128
   static void Emit(X64Emitter& e, const EmitArgType& i) {
     auto addr = ComputeMemoryAddress(e, i.src1);
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
-      assert_false(i.src2.is_constant);
-      e.vpshufb(e.xmm0, i.src2, e.GetXmmConstPtr(XMMByteSwapMask));
-      // changed from vmovaps, the penalty on the vpshufb is unavoidable but
-      // we dont need to incur another here too
+      if (i.src2.is_constant) {
+        e.LoadConstantXmm(e.xmm0, i.src2.constant());
+        e.vpshufb(e.xmm0, e.xmm0, e.GetXmmConstPtr(XMMByteSwapMask));
+      } else {
+        e.vpshufb(e.xmm0, i.src2, e.GetXmmConstPtr(XMMByteSwapMask));
+      }
       e.vmovdqa(e.ptr[addr], e.xmm0);
     } else {
       if (i.src2.is_constant) {

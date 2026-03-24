@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include "xenia/cpu/backend/x64/x64_op.h"
+#include "xenia/cpu/backend/x64/x64_util.h"
 
 // For OPCODE_PACK/OPCODE_UNPACK
 #include "third_party/half/include/half.hpp"
@@ -159,6 +160,17 @@ struct VECTOR_DENORMFLUSH
     : Sequence<VECTOR_DENORMFLUSH,
                I<OPCODE_VECTOR_DENORMFLUSH, V128Op, V128Op>> {
   static void Emit(X64Emitter& e, const EmitArgType& i) {
+    if (e.IsFeatureEnabled(kX64EmitAVX512Ortho | kX64EmitAVX512DQ)) {
+      const Xbyak::Opmask denormal_mask = e.k1;
+      e.vptestnmd(denormal_mask, i.src1,
+                  e.GetXmmConstPtr(XMMSingleDenormalMask));
+      e.vxorps(e.xmm1, e.xmm1, e.xmm1);
+      e.vmovaps(i.dest, i.src1);
+      e.vrangeps(i.dest.reg() | denormal_mask, i.dest, e.xmm1,
+                 FpRangeSelect::AbsMin | FpRangeSign::OperandA);
+      return;
+    }
+
     e.ChangeMxcsrMode(MXCSRMode::Vmx);
     e.vxorps(e.xmm1, e.xmm1, e.xmm1);  // 0.25 P0123
 
@@ -934,6 +946,7 @@ struct VECTOR_SHL_V128
         e.vpmovzxbd(e.ymm2, i.src2);
         e.vpmovzxbd(e.ymm3, e.xmm3);
 
+        // Mask shift counts to 3 bits (0-7) for byte shifts
         e.vpbroadcastd(e.ymm4, e.GetXmmConstPtr(XMMXOPByteShiftMask));
         e.vpand(e.ymm2, e.ymm2, e.ymm4);
         e.vpand(e.ymm3, e.ymm3, e.ymm4);
@@ -1032,7 +1045,8 @@ struct VECTOR_SHL_V128
 
     e.L(looper);
     e.movzx(e.ecx, e.byte[e.rsp + stack_offset_src2 + e.rdx]);
-    e.and_(e.ecx, 7);
+    e.and_(e.cl, 7);  // Mask shift count to 3 bits (0-7) for byte shifts
+
     e.shl(e.byte[e.rsp + stack_offset_src1 + e.rdx], e.cl);
 
     if (e.IsFeatureEnabled(kX64FlagsIndependentVars)) {

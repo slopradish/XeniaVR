@@ -68,8 +68,9 @@ class D3D12CommandProcessor final : public CommandProcessor {
 
   void ClearCaches() override;
 
-  void InitializeShaderStorage(const std::filesystem::path& cache_root,
-                               uint32_t title_id, bool blocking) override;
+  void InitializeShaderStorage(
+      const std::filesystem::path& cache_root, uint32_t title_id, bool blocking,
+      std::function<void()> completion_callback = nullptr) override;
 
   void RequestFrameTrace(const std::filesystem::path& root_path) override;
 
@@ -160,13 +161,6 @@ class D3D12CommandProcessor final : public CommandProcessor {
     kNullRawSRV = kNullRawSRVAndSharedMemoryRawUAVStart,
     kSharedMemoryRawUAV,
 
-    kSharedMemoryR32UintSRV,
-    kSharedMemoryR32G32UintSRV,
-    kSharedMemoryR32G32B32A32UintSRV,
-    kSharedMemoryR32UintUAV,
-    kSharedMemoryR32G32UintUAV,
-    kSharedMemoryR32G32B32A32UintUAV,
-
     kEdramRawSRV,
     kEdramR32UintSRV,
     kEdramR32G32UintSRV,
@@ -191,12 +185,6 @@ class D3D12CommandProcessor final : public CommandProcessor {
   };
   ui::d3d12::util::DescriptorCpuGpuHandlePair GetSystemBindlessViewHandlePair(
       SystemBindlessView view) const;
-  ui::d3d12::util::DescriptorCpuGpuHandlePair
-  GetSharedMemoryUintPow2BindlessSRVHandlePair(
-      uint32_t element_size_bytes_pow2) const;
-  ui::d3d12::util::DescriptorCpuGpuHandlePair
-  GetSharedMemoryUintPow2BindlessUAVHandlePair(
-      uint32_t element_size_bytes_pow2) const;
   ui::d3d12::util::DescriptorCpuGpuHandlePair
   GetEdramUintPow2BindlessSRVHandlePair(uint32_t element_size_bytes_pow2) const;
   ui::d3d12::util::DescriptorCpuGpuHandlePair

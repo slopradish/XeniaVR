@@ -32,9 +32,13 @@
 #define ARCH_X86 0
 #define ARCH_X86_64 0
 
-#if defined(__aarch64__)
-  /* ARM64 (Android) */
-  #define SLIBSUF ".so"
+#if defined(__aarch64__) || defined(_M_ARM64)
+  /* ARM64 */
+  #if defined(_WIN32)
+    #define SLIBSUF ".dll"
+  #else
+    #define SLIBSUF ".so"
+  #endif
   #undef  ARCH_AARCH64
   #define ARCH_AARCH64 1
   #define HAVE_ARMV8 1
@@ -43,14 +47,33 @@
   #define HAVE_ARMV8_EXTERNAL 1
   #define HAVE_NEON_EXTERNAL 1
   #define HAVE_VFP_EXTERNAL 1
-  #define HAVE_ARMV8_INLINE 1
-  #define HAVE_NEON_INLINE 1
-  #define HAVE_VFP_INLINE 1
+  #if defined(_MSC_VER)
+    #define HAVE_ARMV8_INLINE 0
+    #define HAVE_NEON_INLINE 0
+    #define HAVE_VFP_INLINE 0
+  #else
+    #define HAVE_ARMV8_INLINE 1
+    #define HAVE_NEON_INLINE 1
+    #define HAVE_VFP_INLINE 1
+  #endif
   #define HAVE_INTRINSICS_NEON 1
+  #define HAVE_AS_FUNC 0
+  #define HAVE_AS_ARCH_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_CRC_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_DOTPROD_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_I8MM_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_SVE_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_SVE2_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_SME_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_SME_I16I64_DIRECTIVE 0
+  #define HAVE_AS_ARCHEXT_SME2_DIRECTIVE 0
   #define HAVE_ALIGNED_STACK 1
   #define HAVE_FAST_64BIT 1
   #define HAVE_FAST_CLZ 1
+  #define HAVE_LOCAL_ALIGNED 1
   #define HAVE_SIMD_ALIGN_16 1
+  #define HAVE_SIMD_ALIGN_32 0
+  #define HAVE_SIMD_ALIGN_64 0
 #elif defined(__x86_64__) || defined(_M_X64)
   /* x86_64 (Windows, Linux, Android x86_64) */
   #if defined(_WIN32)

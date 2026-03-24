@@ -1251,45 +1251,41 @@ void SpirvShaderTranslator::CompleteFragmentShaderInMain() {
         if_rt_write_mask_not_empty.makeEndIf();
         if_fsi_color_written.makeEndIf();
       } else {
-        if (!gamma_render_target_as_srgb_) {
-          // Convert to gamma space - this is incorrect, since it must be done
-          // after blending on the Xbox 360, but this is just one of many
-          // blending issues in the host render target path. When
-          // gamma_render_target_as_srgb_ is enabled, the host handles gamma
-          // conversion via sRGB render target format after blending.
-          uint_vector_temp_.clear();
-          uint_vector_temp_.push_back(0);
-          uint_vector_temp_.push_back(1);
-          uint_vector_temp_.push_back(2);
-          spv::Id color_rgb = builder_->createRvalueSwizzle(
-              spv::NoPrecision, type_float3_, color, uint_vector_temp_);
-          spv::Id is_gamma = builder_->createBinOp(
-              spv::OpINotEqual, type_bool_,
-              builder_->createBinOp(
-                  spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
-                  builder_->makeUintConstant(kSysFlag_ConvertColor0ToGamma
-                                             << color_target_index)),
-              const_uint_0_);
-          SpirvBuilder::IfBuilder if_gamma(
-              is_gamma, spv::SelectionControlDontFlattenMask, *builder_);
-          spv::Id color_rgb_gamma = LinearToPWLGamma(color_rgb, false);
-          if_gamma.makeEndIf();
-          color_rgb = if_gamma.createMergePhi(color_rgb_gamma, color_rgb);
-          {
-            std::unique_ptr<spv::Instruction> color_rgba_shuffle_op =
-                std::make_unique<spv::Instruction>(builder_->getUniqueId(),
-                                                   type_float4_,
-                                                   spv::OpVectorShuffle);
-            color_rgba_shuffle_op->addIdOperand(color_rgb);
-            color_rgba_shuffle_op->addIdOperand(color);
-            color_rgba_shuffle_op->addImmediateOperand(0);
-            color_rgba_shuffle_op->addImmediateOperand(1);
-            color_rgba_shuffle_op->addImmediateOperand(2);
-            color_rgba_shuffle_op->addImmediateOperand(3 + 3);
-            color = color_rgba_shuffle_op->getResultId();
-            builder_->getBuildPoint()->addInstruction(
-                std::move(color_rgba_shuffle_op));
-          }
+        // Convert to gamma space - this is incorrect, since it must be done
+        // after blending on the Xbox 360, but this is just one of many blending
+        // issues in the host render target path.
+        // TODO(Triang3l): Gamma as unorm8 check.
+        uint_vector_temp_.clear();
+        uint_vector_temp_.push_back(0);
+        uint_vector_temp_.push_back(1);
+        uint_vector_temp_.push_back(2);
+        spv::Id color_rgb = builder_->createRvalueSwizzle(
+            spv::NoPrecision, type_float3_, color, uint_vector_temp_);
+        spv::Id is_gamma = builder_->createBinOp(
+            spv::OpINotEqual, type_bool_,
+            builder_->createBinOp(
+                spv::OpBitwiseAnd, type_uint_, main_system_constant_flags_,
+                builder_->makeUintConstant(kSysFlag_ConvertColor0ToGamma
+                                           << color_target_index)),
+            const_uint_0_);
+        SpirvBuilder::IfBuilder if_gamma(
+            is_gamma, spv::SelectionControlDontFlattenMask, *builder_);
+        spv::Id color_rgb_gamma = LinearToPWLGamma(color_rgb, false);
+        if_gamma.makeEndIf();
+        color_rgb = if_gamma.createMergePhi(color_rgb_gamma, color_rgb);
+        {
+          std::unique_ptr<spv::Instruction> color_rgba_shuffle_op =
+              std::make_unique<spv::Instruction>(
+                  builder_->getUniqueId(), type_float4_, spv::OpVectorShuffle);
+          color_rgba_shuffle_op->addIdOperand(color_rgb);
+          color_rgba_shuffle_op->addIdOperand(color);
+          color_rgba_shuffle_op->addImmediateOperand(0);
+          color_rgba_shuffle_op->addImmediateOperand(1);
+          color_rgba_shuffle_op->addImmediateOperand(2);
+          color_rgba_shuffle_op->addImmediateOperand(3 + 3);
+          color = color_rgba_shuffle_op->getResultId();
+          builder_->getBuildPoint()->addInstruction(
+              std::move(color_rgba_shuffle_op));
         }
 
         builder_->createStore(color, color_variable);
@@ -3802,6 +3798,7 @@ void SpirvShaderTranslator::FSI_AlphaToMask() {
     spv::Block& block_msaa_4x = builder_->makeNewBlock();
     spv::Block& block_msaa_check_2x = builder_->makeNewBlock();
     spv::Block& block_msaa_merge = builder_->makeNewBlock();
+    spv::Block& block_msaa_merge_2x_1x = builder_->makeNewBlock();
 
     // Check if 4x MSAA
     spv::Id is_4x = builder_->createBinOp(
@@ -3830,6 +3827,8 @@ void SpirvShaderTranslator::FSI_AlphaToMask() {
     builder_->setBuildPoint(&block_msaa_check_2x);
     spv::Id is_2x = builder_->createBinOp(
         spv::OpIEqual, type_bool_, msaa_samples, builder_->makeUintConstant(1));
+    builder_->createSelectionMerge(&block_msaa_merge_2x_1x,
+                                   spv::SelectionControlDontFlattenMask);
     builder_->createConditionalBranch(is_2x, &block_msaa_2x_actual,
                                       &block_msaa_1x);
 
@@ -3840,13 +3839,24 @@ void SpirvShaderTranslator::FSI_AlphaToMask() {
                           coverage_2x);
     FSI_AlphaToMaskSample(false, 1, 1.0f, threshold_offset, 1.0f / 8.0f, alpha,
                           coverage_2x);
-    builder_->createBranch(&block_msaa_merge);
+    builder_->createBranch(&block_msaa_merge_2x_1x);
 
     // 1x MSAA path
     builder_->setBuildPoint(&block_msaa_1x);
     spv::Id coverage_1x = main_fsi_sample_mask_;
     FSI_AlphaToMaskSample(false, 0, 1.0f, threshold_offset, 1.0f / 4.0f, alpha,
                           coverage_1x);
+    builder_->createBranch(&block_msaa_merge_2x_1x);
+
+    // Merge 2x/1x MSAA paths
+    builder_->setBuildPoint(&block_msaa_merge_2x_1x);
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(coverage_2x);
+    id_vector_temp_.push_back(block_msaa_2x_actual.getId());
+    id_vector_temp_.push_back(coverage_1x);
+    id_vector_temp_.push_back(block_msaa_1x.getId());
+    spv::Id coverage_2x_1x =
+        builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
     builder_->createBranch(&block_msaa_merge);
 
     // Merge MSAA paths with PHI
@@ -3854,10 +3864,8 @@ void SpirvShaderTranslator::FSI_AlphaToMask() {
     id_vector_temp_.clear();
     id_vector_temp_.push_back(coverage_4x);
     id_vector_temp_.push_back(block_msaa_4x.getId());
-    id_vector_temp_.push_back(coverage_2x);
-    id_vector_temp_.push_back(block_msaa_2x_actual.getId());
-    id_vector_temp_.push_back(coverage_1x);
-    id_vector_temp_.push_back(block_msaa_1x.getId());
+    id_vector_temp_.push_back(coverage_2x_1x);
+    id_vector_temp_.push_back(block_msaa_merge_2x_1x.getId());
     spv::Id coverage_final =
         builder_->createOp(spv::OpPhi, type_uint_, id_vector_temp_);
 

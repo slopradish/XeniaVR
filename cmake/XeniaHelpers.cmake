@@ -5,7 +5,7 @@ include(CMakeParseArguments)
 
 # Platform suffix lists for file filtering
 set(XE_PLATFORM_SUFFIXES
-  _win _linux _posix _gnulinux _x11 _gtk _android _mac
+  _win _linux _posix _gnulinux _x11 _gtk _android _mac _amd64 _arm64
 )
 
 # xe_platform_sources(target base_path [RECURSIVE])
@@ -78,6 +78,17 @@ function(xe_platform_sources target base_path)
   endif()
 
   list(APPEND _sources ${_plat_sources})
+
+  # Add back architecture-specific files
+  if(XE_TARGET_X86_64)
+    file(${glob_mode} _arch_sources "${base_path}/*_amd64.h" "${base_path}/*_amd64.cc")
+  elseif(XE_TARGET_AARCH64)
+    file(${glob_mode} _arch_sources "${base_path}/*_arm64.h" "${base_path}/*_arm64.cc")
+  endif()
+  if(_arch_sources)
+    list(APPEND _sources ${_arch_sources})
+  endif()
+
   target_sources(${target} PRIVATE ${_sources})
 endfunction()
 
@@ -94,6 +105,27 @@ function(xe_target_defaults target)
   )
   if(MSVC)
     target_compile_options(${target} PRIVATE /WX)
+    # Recreate directory structure in Visual Studio filters
+    get_target_property(_srcs ${target} SOURCES)
+    if(_srcs)
+      set(_local_srcs)
+      set(_external_srcs)
+      foreach(_s IN LISTS _srcs)
+        get_filename_component(_abs "${_s}" ABSOLUTE)
+        string(FIND "${_abs}" "${CMAKE_CURRENT_SOURCE_DIR}" _pos)
+        if(_pos EQUAL 0)
+          list(APPEND _local_srcs "${_s}")
+        else()
+          list(APPEND _external_srcs "${_s}")
+        endif()
+      endforeach()
+      if(_local_srcs)
+        source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${_local_srcs})
+      endif()
+      if(_external_srcs)
+        source_group(TREE ${PROJECT_SOURCE_DIR} PREFIX "External" FILES ${_external_srcs})
+      endif()
+    endif()
   elseif(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     # GCC is too noisy for -Werror; only apply to Clang
     target_compile_options(${target} PRIVATE -Werror)
@@ -210,7 +242,7 @@ endfunction()
 function(xe_test_suite name base_path)
   cmake_parse_arguments(ARG "" "" "LINKS" ${ARGN})
 
-  file(GLOB _test_sources CONFIGURE_DEPENDS "${base_path}/*_test.cc")
+  file(GLOB _test_sources "${base_path}/*_test.cc")
 
   if(NOT _test_sources)
     return()
@@ -242,9 +274,12 @@ function(xe_test_suite name base_path)
     target_link_libraries(${name} PRIVATE ${ARG_LINKS})
   endif()
   xe_target_defaults(${name})
+  set_target_properties(${name} PROPERTIES FOLDER "tests")
 
   if(MSVC)
     # Disable Edit and Continue - breaks Catch2 __LINE__ usage
     target_compile_options(${name} PRIVATE /Zi)
   endif()
+
+  catch_discover_tests(${name})
 endfunction()

@@ -28,11 +28,11 @@ if(XENIA_BUILD_MISC)
   )
   target_link_libraries(xenia-gpu-vulkan-trace-viewer PRIVATE
     xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
-    xenia-gpu xenia-gpu-vulkan xenia-hid xenia-hid-nop xenia-hid-skylander
+    xenia-gpu xenia-gpu-vulkan xenia-hid xenia-hid-nop
     xenia-kernel xenia-patcher xenia-ui xenia-ui-vulkan xenia-vfs
     aes_128 capstone fmt glslang-spirv imgui libavcodec libavutil mspack snappy xxhash
   )
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-vulkan-trace-viewer PRIVATE xenia-cpu-backend-x64)
   endif()
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -57,11 +57,11 @@ if(XENIA_BUILD_MISC)
   )
   target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE
     xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
-    xenia-gpu xenia-gpu-vulkan xenia-hid xenia-hid-nop xenia-hid-skylander
+    xenia-gpu xenia-gpu-vulkan xenia-hid xenia-hid-nop
     xenia-kernel xenia-patcher xenia-ui xenia-ui-vulkan xenia-vfs
     aes_128 capstone fmt glslang-spirv imgui libavcodec libavutil mspack snappy xxhash
   )
-  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-vulkan-trace-dump PRIVATE xenia-cpu-backend-x64)
   endif()
   xe_target_defaults(xenia-gpu-vulkan-trace-dump)

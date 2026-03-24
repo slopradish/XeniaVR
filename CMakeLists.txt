@@ -6,9 +6,35 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Detect target architecture.
+# - VS generator: CMAKE_GENERATOR_PLATFORM (from -A flag) takes priority.
+# - Ninja/Makefiles: CMAKE_SYSTEM_PROCESSOR (set via -DCMAKE_SYSTEM_NAME
+#   + -DCMAKE_SYSTEM_PROCESSOR for cross-compile, or auto-detected natively).
+if(CMAKE_GENERATOR_PLATFORM)
+  if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+    set(XE_TARGET_AARCH64 TRUE)
+    set(XE_TARGET_X86_64 FALSE)
+  else()
+    set(XE_TARGET_AARCH64 FALSE)
+    set(XE_TARGET_X86_64 TRUE)
+  endif()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|ARM64")
+  set(XE_TARGET_AARCH64 TRUE)
+  set(XE_TARGET_X86_64 FALSE)
+else()
+  set(XE_TARGET_AARCH64 FALSE)
+  set(XE_TARGET_X86_64 TRUE)
+endif()
+message(STATUS "Target architecture: XE_TARGET_AARCH64=${XE_TARGET_AARCH64} XE_TARGET_X86_64=${XE_TARGET_X86_64} (CMAKE_SYSTEM_PROCESSOR=${CMAKE_SYSTEM_PROCESSOR})")
+
 # Options
 option(XENIA_BUILD_TESTS "Build test suites" OFF)
 option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler, vfs-dump, demos)" OFF)
+
+if(XENIA_BUILD_TESTS)
+  enable_testing()
+  include(${PROJECT_SOURCE_DIR}/third_party/catch/contrib/Catch.cmake)
+endif()
 
 # Multi-config generators (VS, Ninja Multi-Config)
 get_property(_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
@@ -30,10 +56,13 @@ else()
   set(XE_PLATFORM_NAME "Linux")
 endif()
 
-# Output directories (use PROJECT_SOURCE_DIR so VS and Ninja share the same paths)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin/${XE_PLATFORM_NAME}")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/bin/${XE_PLATFORM_NAME}")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/build/obj/${XE_PLATFORM_NAME}")
+# Output directories — strip any vs-* nesting from CMAKE_BINARY_DIR so that
+# VS and Ninja builds for the same architecture share an output directory,
+# while different architectures (build/ vs build-arm64/) stay separate.
+string(REGEX REPLACE "/vs-[^/]+$" "" XE_OUTPUT_ROOT "${CMAKE_BINARY_DIR}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${XE_OUTPUT_ROOT}/bin/${XE_PLATFORM_NAME}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${XE_OUTPUT_ROOT}/bin/${XE_PLATFORM_NAME}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/obj/${XE_PLATFORM_NAME}")
 
 # Create scratch/ if needed
 file(MAKE_DIRECTORY "${PROJECT_SOURCE_DIR}/scratch")
@@ -48,6 +77,7 @@ include(cmake/XeniaHelpers.cmake)
 include_directories(
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/src
+  ${CMAKE_BINARY_DIR}
   ${PROJECT_SOURCE_DIR}/third_party
 )
 
@@ -71,9 +101,11 @@ if(MSVC)
   add_compile_options(
     /utf-8       # Build correctly on systems with non-Latin codepages
     /wd4201      # Nameless struct/unions are ok
-    /arch:AVX    # AVX vector extensions
     /MP          # Multi-processor compilation
   )
+  if(XE_TARGET_X86_64)
+    add_compile_options(/arch:AVX)
+  endif()
   add_compile_definitions(
     _CRT_NONSTDC_NO_DEPRECATE
     _CRT_SECURE_NO_WARNINGS
@@ -88,6 +120,7 @@ if(MSVC)
     /ignore:4006  # Ignores complaints about empty obj files
     /ignore:4221
   )
+
   # Global Windows system libraries
   link_libraries(
     ntdll wsock32 ws2_32 xinput comctl32 shcore shlwapi dxguid bcrypt
@@ -117,6 +150,10 @@ if(MSVC)
   add_compile_definitions($<$<CONFIG:Release>:_NO_DEBUG_HEAP=1>)
   add_compile_options($<$<CONFIG:Release>:/Gw>)
   add_compile_options($<$<CONFIG:Release>:/GS->)  # NoBufferSecurityCheck
+  add_compile_options($<$<CONFIG:Release>:/Zi>)    # Generate PDB debug info
+  add_link_options($<$<CONFIG:Release>:/DEBUG>)     # Emit .pdb for the linked binary
+  add_link_options($<$<CONFIG:Release>:/OPT:REF>)   # Remove unreferenced functions/data
+  add_link_options($<$<CONFIG:Release>:/OPT:ICF>)   # Fold identical COMDATs
   # Replace /Ob2 with /Ob3 in CMake's default Release flags
   string(REPLACE "/Ob2" "/Ob3" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
   string(REPLACE "/Ob2" "/Ob3" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
@@ -127,7 +164,9 @@ if(MSVC)
 
 else()
   # GCC/Clang (Linux)
-  add_compile_options(-mavx)
+  if(XE_TARGET_X86_64)
+    add_compile_options(-mavx)
+  endif()
 
   # Disable specific warnings for C++
   add_compile_options(
