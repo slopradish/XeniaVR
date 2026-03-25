@@ -141,11 +141,6 @@ inline int SrcVReg(A64Emitter& e, const T& op, int scratch_idx) {
   return op.reg().getIdx();
 }
 
-// Byte-swap index within 32-bit lanes (for PPC big-endian conversion).
-inline int bswap_lane_idx(int byte_idx) {
-  return (byte_idx & ~3) | (3 - (byte_idx & 3));
-}
-
 // Compute a guest memory address, returning the XReg for [x21, xN] addressing.
 // For constants, loads the address into x0 (scratch).
 inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
@@ -168,9 +163,7 @@ inline XReg ComputeMemoryAddress(A64Emitter& e, const I64Op& guest) {
       e.cmp(e.w0, e.w17);
       auto& skip = e.NewCachedLabel();
       e.b(LO, skip);
-      // 0x1000 doesn't fit in a 12-bit immediate; use mov+add.
-      e.mov(e.w17, 0x1000u);
-      e.add(e.w0, e.w0, e.w17);
+      e.add(e.w0, e.w0, 1, 12);  // add 0x1000 via LSL #12
       e.L(skip);
     }
     return e.x0;

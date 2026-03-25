@@ -76,7 +76,7 @@ struct CACHE_CONTROL
     : Sequence<CACHE_CONTROL,
                I<OPCODE_CACHE_CONTROL, VoidOp, I64Op, OffsetOp>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    bool is_prefetch = false, is_prefetchw = false;
+    bool is_clflush = false, is_prefetch = false, is_prefetchw = false;
     switch (CacheControlType(i.instr->flags)) {
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_TOUCH:
         is_prefetch = true;
@@ -86,15 +86,18 @@ struct CACHE_CONTROL
         break;
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_STORE:
       case CacheControlType::CACHE_CONTROL_TYPE_DATA_STORE_AND_FLUSH:
-        // ARM64 dc instructions aren't available in xbyak_aarch64.
-        // These are mostly hints anyway; skip.
-        return;
+        is_clflush = true;
+        break;
       default:
         return;
     }
     auto addr = ComputeMemoryAddress(e, i.src1);
     e.add(e.x0, e.GetMembaseReg(), addr);
     size_t cache_line_size = i.src2.value;
+    if (is_clflush) {
+      // dc civac, x0
+      e.sys(0b011, 0b0111, 0b1110, 0b001, e.x0);
+    }
     if (is_prefetch) {
       e.prfm(Xbyak_aarch64::PLDL1KEEP, ptr(e.x0));
     } else if (is_prefetchw) {
@@ -102,6 +105,10 @@ struct CACHE_CONTROL
     }
     if (cache_line_size >= 128) {
       e.eor(e.x0, e.x0, 64);
+      if (is_clflush) {
+        // dc civac, x0
+        e.sys(0b011, 0b0111, 0b1110, 0b001, e.x0);
+      }
       if (is_prefetch) {
         e.prfm(Xbyak_aarch64::PLDL1KEEP, ptr(e.x0));
       } else if (is_prefetchw) {
@@ -900,6 +907,12 @@ struct ATOMIC_EXCHANGE_I8
     } else {
       e.and_(e.w0, i.src2, 0xFF);
     }
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.swpalb(i.dest, e.w0, ptr(e.x4));
+      return;
+    }
+
     auto& retry = e.NewCachedLabel();
     e.L(retry);
     e.ldaxrb(e.w1, ptr(e.x4));
@@ -923,6 +936,12 @@ struct ATOMIC_EXCHANGE_I16
     } else {
       e.and_(e.w0, i.src2, 0xFFFF);
     }
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.swpalh(i.dest, e.w0, ptr(e.x4));
+      return;
+    }
+
     auto& retry = e.NewCachedLabel();
     e.L(retry);
     e.ldaxrh(e.w1, ptr(e.x4));
@@ -947,6 +966,12 @@ struct ATOMIC_EXCHANGE_I32
     } else {
       e.mov(e.w0, i.src2);
     }
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.swpal(i.dest, e.w0, ptr(e.x4));
+      return;
+    }
+
     auto& retry = e.NewCachedLabel();
     e.L(retry);
     e.ldaxr(e.w1, ptr(e.x4));
@@ -969,6 +994,12 @@ struct ATOMIC_EXCHANGE_I64
     } else {
       e.mov(e.x0, i.src2);
     }
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.swpal(i.dest, e.x0, ptr(e.x4));
+      return;
+    }
+
     auto& retry = e.NewCachedLabel();
     e.L(retry);
     e.ldaxr(e.x1, ptr(e.x4));
@@ -1004,6 +1035,15 @@ struct ATOMIC_COMPARE_EXCHANGE_I32
     } else {
       e.mov(e.w6, i.src3);
     }
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.mov(e.w0, e.w5);
+      e.casal(e.w5, e.w6, ptr(e.x4));
+      e.cmp(e.w5, e.w0);
+      e.cset(i.dest, Xbyak_aarch64::EQ);
+      return;
+    }
+
     auto& retry = e.NewCachedLabel();
     auto& fail = e.NewCachedLabel();
     auto& done = e.NewCachedLabel();
@@ -1037,6 +1077,15 @@ struct ATOMIC_COMPARE_EXCHANGE_I64
     } else {
       e.mov(e.x6, i.src3);
     }
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.mov(e.x0, e.x5);
+      e.casal(e.x5, e.x6, ptr(e.x4));
+      e.cmp(e.x5, e.x0);
+      e.cset(i.dest, Xbyak_aarch64::EQ);
+      return;
+    }
+
     auto& retry = e.NewCachedLabel();
     auto& fail = e.NewCachedLabel();
     auto& done = e.NewCachedLabel();
@@ -1194,6 +1243,15 @@ struct RESERVED_STORE_I32
     }
     // Compute host address.
     e.add(e.x4, e.GetMembaseReg(), addr);
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.mov(e.w0, e.w5);
+      e.casal(e.w5, e.w6, ptr(e.x4));
+      e.cmp(e.w5, e.w0);
+      e.cset(i.dest, Xbyak_aarch64::EQ);
+      return;
+    }
+
     // LDXR/STXR loop.
     auto& cas_loop = e.NewCachedLabel();
     auto& cas_fail = e.NewCachedLabel();
@@ -1242,6 +1300,15 @@ struct RESERVED_STORE_I64
       e.mov(e.x6, XReg(i.src2.reg().getIdx()));
     }
     e.add(e.x4, e.GetMembaseReg(), addr);
+
+    if (e.IsFeatureEnabled(kA64EmitLSE)) {
+      e.mov(e.x0, e.x5);
+      e.casal(e.x5, e.x6, ptr(e.x4));
+      e.cmp(e.x5, e.x0);
+      e.cset(i.dest, Xbyak_aarch64::EQ);
+      return;
+    }
+
     auto& cas_loop = e.NewCachedLabel();
     auto& cas_fail = e.NewCachedLabel();
     e.L(cas_loop);

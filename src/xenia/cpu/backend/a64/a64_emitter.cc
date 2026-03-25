@@ -75,7 +75,8 @@ A64Emitter::A64Emitter(A64Backend* backend, XbyakA64Allocator* allocator)
       processor_(backend->processor()),
       backend_(backend),
       code_cache_(backend->code_cache()),
-      allocator_(allocator) {}
+      allocator_(allocator),
+      feature_flags_(arm64::GetFeatureFlags()) {}
 
 A64Emitter::~A64Emitter() = default;
 
@@ -136,6 +137,7 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // ARM64 ABI: SP must always be 16-byte aligned.
   assert_true(stack_size % 16 == 0);
   func_info.stack_size = stack_size;
+  func_info.lr_save_offset = StackLayout::HOST_RET_ADDR;
   stack_size_ = stack_size;
 
   struct {
@@ -182,8 +184,9 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // ========================================================================
   code_offsets.body = getSize();
 
-  // Allocate the epilog label.
+  // Allocate the epilog label (owned by label_cache_ for cleanup).
   auto epilog_label_ptr = new Label();
+  label_cache_.push_back(epilog_label_ptr);
   epilog_label_ = epilog_label_ptr;
 
   // Walk HIR blocks and emit ARM64 instructions.
