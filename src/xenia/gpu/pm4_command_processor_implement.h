@@ -955,6 +955,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_EXT(
 }
 
 static uint32_t samples = cvars::query_occlusion_sample_upper_threshold;
+static uint32_t batched_samples = 0;
 
 XE_NOINLINE
 bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
@@ -976,13 +977,25 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_EVENT_WRITE_ZPD(
       register_file_->values[XE_GPU_REG_RB_SAMPLE_COUNT_ADDR]);
   // 0xFFFFFEED is written to this two locations by D3D only on D3DISSUE_END
   // and used to detect a finished query.
-  bool is_end_via_z_pass = pSampleCounts->ZPass_A == kQueryFinished &&
+  bool is_end_via_z_pass = pSampleCounts->ZPass_A == kQueryFinished ||
                            pSampleCounts->ZPass_B == kQueryFinished;
   // Older versions of D3D also checks for ZFail (4D5307D5).
-  bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished &&
+  bool is_end_via_z_fail = pSampleCounts->ZFail_A == kQueryFinished ||
                            pSampleCounts->ZFail_B == kQueryFinished;
   std::memset(pSampleCounts, 0, sizeof(xe_gpu_depth_sample_counts));
-  if (is_end_via_z_pass || is_end_via_z_fail) {
+
+  // Titles that use QueryBatch (4D5309B1, 4E4D0801) don't use an END result for
+  // every query. Each ISSUE snapshots the sample count into a new slot and
+  // recovers the total by looking at differences between slots.
+  // END detection isn't sufficient here.
+  if (cvars::query_occlusion_batched) {
+    // Mimic batched behavior by reporting a running count and writing it on
+    // every event.
+    const uint32_t step = std::max(uint32_t(1), samples);
+    batched_samples = std::min(batched_samples, UINT32_MAX - step) + step;
+    pSampleCounts->ZPass_A = batched_samples;
+    pSampleCounts->Total_A = batched_samples;
+  } else if (is_end_via_z_pass || is_end_via_z_fail) {
     pSampleCounts->ZPass_A = samples;
     pSampleCounts->Total_A = samples;
   }
