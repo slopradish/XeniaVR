@@ -11,6 +11,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/string_util.h"
+#include "xenia/config.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/title_id_utils.h"
 #include "xenia/kernel/user_module.h"
@@ -21,6 +22,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_modules.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+#include "xenia/kernel/xconfig.h"
 #include "xenia/kernel/xenumerator.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -44,10 +46,6 @@ DEFINE_int32(avpack, 8,
              " 7 = TV PAL-60\n"
              " 8 = HDMI (default)",
              "Video");
-DECLARE_int32(user_country);
-DECLARE_int32(user_language);
-DECLARE_uint32(audio_flag);
-
 DEFINE_bool(staging_mode, 0,
             "Enables preview mode in dashboards to render debug information.",
             "Kernel");
@@ -89,40 +87,6 @@ dword_result_t XamGetOnlineSchema_entry() {
   return schema_guest;
 }
 DECLARE_XAM_EXPORT1(XamGetOnlineSchema, kNone, kImplemented);
-
-void XamFormatDateString_entry(dword_t locale_format, qword_t filetime,
-                               lpvoid_t output_buffer, dword_t output_count) {
-  output_buffer.Zero(output_count * sizeof(char16_t));
-
-  auto tp = xe::chrono::WinSystemClock::to_sys(
-      xe::chrono::WinSystemClock::from_file_time(filetime));
-  auto dp = date::floor<date::days>(tp);
-  auto year_month_day = date::year_month_day{dp};
-
-  auto str = fmt::format(u"{:02d}/{:02d}/{}",
-                         static_cast<unsigned>(year_month_day.month()),
-                         static_cast<unsigned>(year_month_day.day()),
-                         static_cast<int>(year_month_day.year()));
-  xe::string_util::copy_and_swap_truncating(output_buffer.as<char16_t*>(), str,
-                                            output_count);
-}
-DECLARE_XAM_EXPORT1(XamFormatDateString, kNone, kImplemented);
-
-void XamFormatTimeString_entry(dword_t user_index, qword_t filetime,
-                               lpvoid_t output_buffer, dword_t output_count) {
-  output_buffer.Zero(output_count * sizeof(char16_t));
-
-  auto tp = xe::chrono::WinSystemClock::to_sys(
-      xe::chrono::WinSystemClock::from_file_time(filetime));
-  auto dp = date::floor<date::days>(tp);
-  auto time = date::hh_mm_ss{date::floor<std::chrono::milliseconds>(tp - dp)};
-
-  auto str = fmt::format(u"{:02d}:{:02d}", time.hours().count(),
-                         time.minutes().count());
-  xe::string_util::copy_and_swap_truncating(output_buffer.as<char16_t*>(), str,
-                                            output_count);
-}
-DECLARE_XAM_EXPORT1(XamFormatTimeString, kNone, kImplemented);
 
 dword_result_t keXamBuildResourceLocator(uint64_t module,
                                          const std::u16string& container,
@@ -253,61 +217,6 @@ dword_result_t XGetAVPack_entry() {
 }
 DECLARE_XAM_EXPORT1(XGetAVPack, kNone, kStub);
 
-uint32_t xeXGetGameRegion() {
-  static uint32_t constexpr table[] = {
-      0xFFFFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x02FEu, 0x0201u, 0x03FFu,
-      0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu,
-      0x00FFu, 0xFFFFu, 0x02FEu, 0x03FFu, 0x0102u, 0x03FFu, 0x03FFu, 0x02FEu,
-      0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu,
-      0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x03FFu, 0x0101u, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x02FEu, 0x02FEu,
-      0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x03FFu, 0x0102u, 0x03FFu, 0x00FFu,
-      0x03FFu, 0x03FFu, 0x02FEu, 0x02FEu, 0x0201u, 0x03FFu, 0x03FFu, 0x03FFu,
-      0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu, 0x03FFu, 0x03FFu, 0x02FEu,
-      0x02FEu, 0x03FFu, 0x02FEu, 0x03FFu, 0x02FEu, 0x02FEu, 0xFFFFu, 0x03FFu,
-      0x03FFu, 0x03FFu, 0x03FFu, 0x02FEu, 0x03FFu, 0x03FFu, 0x02FEu, 0x00FFu,
-      0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu, 0x03FFu};
-  auto country = static_cast<uint8_t>(cvars::user_country);
-  return country < xe::countof(table) ? table[country] : 0xFFFFu;
-}
-
-dword_result_t XGetGameRegion_entry() { return xeXGetGameRegion(); }
-DECLARE_XAM_EXPORT1(XGetGameRegion, kNone, kStub);
-
-XLanguage xeGetLanguage(bool extended_languages_support) {
-  auto desired_language = static_cast<XLanguage>(cvars::user_language);
-  uint32_t region = xeXGetGameRegion();
-  auto max_languages = extended_languages_support ? XLanguage::kMaxLanguages
-                                                  : XLanguage::kSChinese;
-  if (desired_language < max_languages) {
-    return desired_language;
-  }
-  if ((region & 0xff00) != 0x100) {
-    return XLanguage::kEnglish;
-  }
-  switch (region) {
-    case 0x101:  // NTSC-J (Japan)
-      return XLanguage::kJapanese;
-    case 0x102:  // NTSC-J (China)
-      return extended_languages_support ? XLanguage::kSChinese
-                                        : XLanguage::kEnglish;
-    default:
-      return XLanguage::kKorean;
-  }
-}
-
-dword_result_t XGetLanguage_entry() {
-  return static_cast<uint32_t>(xeGetLanguage(false));
-}
-DECLARE_XAM_EXPORT1(XGetLanguage, kNone, kImplemented);
-
-dword_result_t XamGetLanguage_entry() {
-  return static_cast<uint32_t>(xeGetLanguage(true));
-}
-DECLARE_XAM_EXPORT1(XamGetLanguage, kNone, kImplemented);
-
 dword_result_t XamGetCurrentTitleId_entry() {
   return kernel_state()->emulator()->title_id();
 }
@@ -414,6 +323,9 @@ void XamLoaderLaunchTitle_entry(lpstring_t raw_name_ptr, dword_t flags) {
             while (!dialog->IsClosing()) {
               std::this_thread::yield();
             }
+
+            config::SaveConfig();
+            xe::FlushLog();
 
             std::quick_exit(0);
           }).detach();
@@ -692,11 +604,11 @@ dword_result_t XGetAudioFlags_entry() {
     return 2;
   }
 
-  if (!cvars::audio_flag) {
-    return 0x10000 | 0x1;
-  }
+  const auto audio_flags = kernel_state()->xconfig()->ReadSetting<uint32_t>(
+      XCONFIG_USER_CATEGORY,
+      XCONFIG_USER_CATEGORY_ENTRIES::XCONFIG_USER_AUDIO_FLAGS);
 
-  return cvars::audio_flag;
+  return audio_flags ? audio_flags : 0x10000 | 0x1;
 }
 DECLARE_XAM_EXPORT1(XGetAudioFlags, kNone, kImplemented);
 
@@ -850,6 +762,21 @@ void GetSystemTimeAsFileTime_entry(lpqword_t time_ptr,
   }
 }
 DECLARE_XAM_EXPORT1(GetSystemTimeAsFileTime, kNone, kImplemented);
+
+dword_result_t XamIsIptvEnabled_entry() {
+  const bool iptv_enabled =
+      kernel_state()->xconfig()->ReadSetting<uint32_t>(
+          X_CONFIG_CATEGORY::XCONFIG_USER_CATEGORY, XCONFIG_USER_RETAIL_FLAGS) &
+      X_RETAIL_FLAGS::IPTVEnabled;
+
+  return !iptv_enabled ? X_E_FAIL : X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamIsIptvEnabled, kNone, kImplemented);
+
+dword_result_t XamLookupCommonStringByIndex_entry(dword_t string_index) {
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamLookupCommonStringByIndex, kNone, kImplemented);
 
 }  // namespace xam
 }  // namespace kernel

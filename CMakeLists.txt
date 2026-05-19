@@ -38,8 +38,8 @@ option(XENIA_BUILD_TESTS "Build test suites" OFF)
 option(XENIA_BUILD_MISC "Build misc subprojects (trace viewers, shader compiler, vfs-dump, demos)" OFF)
 
 # Toggle profiler
-add_compile_definitions(XE_OPTION_PROFILING=1)
-add_compile_definitions(XE_OPTION_PROFILING_UI=1)
+add_compile_definitions(XE_OPTION_PROFILING=0)
+add_compile_definitions(XE_OPTION_PROFILING_UI=0)
 
 if(XENIA_BUILD_TESTS)
   enable_testing()
@@ -228,6 +228,7 @@ else()
   # C-specific warnings
   add_compile_options(
     $<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>
+    $<$<COMPILE_LANGUAGE:C>:-Wno-incompatible-pointer-types>
   )
 
   if(APPLE)
