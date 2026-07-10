@@ -695,7 +695,7 @@ dword_result_t XamReadTile_entry(dword_t tile_type, dword_t title_id,
                                  qword_t item_id, dword_t user_index,
                                  lpdword_t output_ptr,
                                  lpdword_t buffer_size_ptr,
-                                 lpvoid_t overlapped_ptr) {
+                                 pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
   auto user = kernel_state()->xam_state()->GetUserProfile(user_index);
   if (!user) {
     user = kernel_state()->xam_state()->GetUserProfile(item_id);
@@ -747,9 +747,10 @@ dword_result_t XamReadTileEx_entry(dword_t tile_type, dword_t game_id,
                                    qword_t item_id, dword_t offset,
                                    dword_t unk1, dword_t unk2,
                                    lpdword_t output_ptr,
-                                   lpdword_t buffer_size_ptr) {
+                                   lpdword_t buffer_size_ptr,
+                                   pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
   return XamReadTile_entry(tile_type, game_id, item_id, offset, output_ptr,
-                           buffer_size_ptr, 0);
+                           buffer_size_ptr, overlapped_ptr);
 }
 DECLARE_XAM_EXPORT1(XamReadTileEx, kUserProfiles, kSketchy);
 
@@ -938,13 +939,16 @@ dword_result_t XamWriteGamerTile_entry(
     const auto gamerpic_small_png =
         kernel_state()->xam_state()->spa_info()->GetIcon(small_tile_id);
 
+    const std::error_code ec =
+        xe::filesystem::CreateFolder(gamer_pictures_storage_path);
+
     FILE* big_gamerpic_file = xe::filesystem::OpenFile(big_gamerpic_path, "ab");
     FILE* small_gamerpic_file =
         xe::filesystem::OpenFile(small_gamerpic_path, "ab");
 
     X_RESULT result = X_ERROR_SUCCESS;
 
-    if (!big_gamerpic_file || !small_gamerpic_file) {
+    if (ec || !big_gamerpic_file || !small_gamerpic_file) {
       extended_error = X_E_FUNCTION_FAILED;
       return X_ERROR_FUNCTION_FAILED;
     }

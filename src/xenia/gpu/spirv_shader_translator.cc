@@ -252,6 +252,10 @@ void SpirvShaderTranslator::StartTranslation() {
       type_uint4_, builder_->makeUintConstant(4), sizeof(uint32_t) * 4);
   builder_->addDecoration(type_uint4_array_4, spv::DecorationArrayStride,
                           sizeof(uint32_t) * 4);
+  spv::Id type_uint4_array_8 = builder_->makeArrayType(
+      type_uint4_, builder_->makeUintConstant(8), sizeof(uint32_t) * 4);
+  builder_->addDecoration(type_uint4_array_8, spv::DecorationArrayStride,
+                          sizeof(uint32_t) * 4);
   spv::Id type_float4_array_6 = builder_->makeArrayType(
       type_float4_, builder_->makeUintConstant(6), sizeof(float) * 4);
   builder_->addDecoration(type_float4_array_6, spv::DecorationArrayStride,
@@ -283,12 +287,14 @@ void SpirvShaderTranslator::StartTranslation() {
        type_uint_},
       {"alpha_test_reference", offsetof(SystemConstants, alpha_test_reference),
        type_float_},
-      {"alpha_to_mask", offsetof(SystemConstants, alpha_to_mask), type_uint_},
       {"edram_32bpp_tile_pitch_dwords_scaled",
        offsetof(SystemConstants, edram_32bpp_tile_pitch_dwords_scaled),
        type_uint_},
       {"edram_depth_base_dwords_scaled",
        offsetof(SystemConstants, edram_depth_base_dwords_scaled), type_uint_},
+      {"alpha_to_mask", offsetof(SystemConstants, alpha_to_mask), type_uint_},
+      {"zpd_fsi_counter_index",
+       offsetof(SystemConstants, zpd_fsi_counter_index), type_uint_},
       {"color_exp_bias", offsetof(SystemConstants, color_exp_bias),
        type_float4_},
       {"edram_poly_offset_front_scale",
@@ -315,6 +321,9 @@ void SpirvShaderTranslator::StartTranslation() {
        type_float4_array_4},
       {"edram_blend_constant", offsetof(SystemConstants, edram_blend_constant),
        type_float4_},
+      {"texture_integer_scale_bits",
+       offsetof(SystemConstants, texture_integer_scale_bits),
+       type_uint4_array_8},
   };
   id_vector_temp_.clear();
   id_vector_temp_.reserve(xe::countof(system_constants));
@@ -2160,6 +2169,37 @@ void SpirvShaderTranslator::StartFragmentShaderBeforeMain() {
     builder_->addDecoration(buffer_edram_, spv::DecorationBinding, 1);
     if (features_.spirv_version >= spv::Spv_1_4) {
       main_interface_.push_back(buffer_edram_);
+    }
+
+    // ZPD FSI counter buffer uint[].
+    id_vector_temp_.clear();
+    id_vector_temp_.push_back(builder_->makeRuntimeArray(type_uint_));
+    builder_->addDecoration(id_vector_temp_.back(), spv::DecorationArrayStride,
+                            sizeof(uint32_t));
+    spv::Id type_zpd_fsi_counter =
+        builder_->makeStructType(id_vector_temp_, "XeZPDFSICounter");
+    builder_->addMemberName(type_zpd_fsi_counter, 0, "counter");
+    builder_->addMemberDecoration(type_zpd_fsi_counter, 0,
+                                  spv::DecorationCoherent);
+    builder_->addMemberDecoration(type_zpd_fsi_counter, 0,
+                                  spv::DecorationRestrict);
+    builder_->addMemberDecoration(type_zpd_fsi_counter, 0,
+                                  spv::DecorationOffset, 0);
+    builder_->addDecoration(type_zpd_fsi_counter,
+                            features_.spirv_version >= spv::Spv_1_3
+                                ? spv::DecorationBlock
+                                : spv::DecorationBufferBlock);
+    buffer_zpd_fsi_counter_ = builder_->createVariable(
+        spv::NoPrecision,
+        features_.spirv_version >= spv::Spv_1_3 ? spv::StorageClassStorageBuffer
+                                                : spv::StorageClassUniform,
+        type_zpd_fsi_counter, "xe_zpd_fsi_counter");
+    builder_->addDecoration(buffer_zpd_fsi_counter_,
+                            spv::DecorationDescriptorSet,
+                            int(kDescriptorSetSharedMemoryAndEdram));
+    builder_->addDecoration(buffer_zpd_fsi_counter_, spv::DecorationBinding, 2);
+    if (features_.spirv_version >= spv::Spv_1_4) {
+      main_interface_.push_back(buffer_zpd_fsi_counter_);
     }
   }
 

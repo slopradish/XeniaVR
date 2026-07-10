@@ -120,6 +120,8 @@ uint32_t KernelState::title_id() const {
   return 0;
 }
 
+bool KernelState::is_title_open() const { return emulator_->is_title_open(); }
+
 const std::unique_ptr<xam::SpaInfo> KernelState::title_xdbf() const {
   return module_xdbf(executable_module_);
 }
@@ -1274,8 +1276,7 @@ XE_COLD
 uint32_t KernelState::CreateKeTimestampBundle() {
   auto crit = global_critical_region::Acquire();
 
-  uint32_t pKeTimeStampBundle =
-      memory_->SystemHeapAlloc(sizeof(X_TIME_STAMP_BUNDLE));
+  const uint32_t pKeTimeStampBundle = 0x80240EE0;
   X_TIME_STAMP_BUNDLE* lpKeTimeStampBundle =
       memory_->TranslateVirtual<X_TIME_STAMP_BUNDLE*>(pKeTimeStampBundle);
 
