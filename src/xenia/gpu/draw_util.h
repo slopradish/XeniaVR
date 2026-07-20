@@ -713,9 +713,19 @@ struct ResolveInfo {
     // Not doing -32...32 to -1...1 clamping here as a hack for k_16_16 and
     // k_16_16_16_16 blending emulation when using host render targets as it
     // would be inconsistent with the usual way of clearing with a depth quad.
-    // TODO(Triang3l): Check which 32-bit portion is in which register.
-    constants_out.rt_specific.clear_value[0] = rb_color_clear;
-    constants_out.rt_specific.clear_value[1] = rb_color_clear_lo;
+    if (color_edram_info.format_is_64bpp) {
+      // RB_COLOR_CLEAR_LO holds the lower 32 bits.
+      // Red | green << 16 for 16_16_16_16, red for 32_32_FLOAT.
+      // RB_COLOR_CLEAR holds the upper 32 bits.
+      // D3D builds the low dword as R | G << 16 and the high as B | A << 16,
+      // and writes to the _LO and base register respectively.
+      constants_out.rt_specific.clear_value[0] = rb_color_clear_lo;
+      constants_out.rt_specific.clear_value[1] = rb_color_clear;
+    } else {
+      // 32bpp clear values are only taken from RB_COLOR_CLEAR.
+      constants_out.rt_specific.clear_value[0] = rb_color_clear;
+      constants_out.rt_specific.clear_value[1] = rb_color_clear;
+    }
     constants_out.rt_specific.edram_info = color_edram_info;
     constants_out.coordinate_info = coordinate_info;
   }
@@ -753,6 +763,13 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
                     bool fixed_rg16_truncated_to_minus_1_to_1,
                     bool fixed_rgba16_truncated_to_minus_1_to_1,
                     ResolveInfo& info_out);
+
+// Returns log2 of the resolve copy destination texel size in bytes for the
+// destination info previously returned by a render target cache Resolve (with
+// the format already normalized to the actual xenos::TextureFormat) - the same
+// derivation the destination extent was calculated with in GetResolveInfo.
+uint32_t GetResolveDownscalePixelSizeLog2(
+    reg::RB_COPY_DEST_INFO copy_dest_info);
 
 }  // namespace draw_util
 }  // namespace gpu
